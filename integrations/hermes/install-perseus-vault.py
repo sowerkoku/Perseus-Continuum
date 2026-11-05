@@ -101,7 +101,7 @@ def get_hermes_home() -> Path:
 # ===========================================================================
 
 PLUGIN_YAML = r"""name: perseus-vault
-version: "0.2.0"
+version: "0.2.1"
 description: "Perseus Vault memory provider via MCP HTTP — persistent, cross-session knowledge with semantic search and bi-temporal queries"
 author: "Perseus Computing"
 cli_commands:
@@ -151,6 +151,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -1674,15 +1675,36 @@ class PerseusVaultProvider(MemoryProvider):
 
     name = "perseus-vault"
 
+    # Redaction applied to every capture payload BEFORE it reaches the
+    # shared vault: session transcripts may contain credentials and LAN
+    # addresses, and vault memory is readable by other clients.
+    _REDACT_RES = (
+        re.compile(r"Bearer\s+[A-Za-z0-9._~+/-]+=*"),
+        re.compile(r"(?i)\b(?:api[_-]?key|token|password|passwd|secret)\b\s*[:=]\s*\S+"),
+        re.compile(r"\b(?:sk-|ghp_|gho_|xoxb_|xoxp_|npm_)[A-Za-z0-9_\-]{10,}"),
+        re.compile(r"\b(?:192\.168|10\.\d+|172\.(?:1[6-9]|2[0-9]|3[01]))\.\d{1,3}\.\d{1,3}\b"),
+    )
+
+    @classmethod
+    def _redact(cls, text: str) -> str:
+        """Strip credentials and private-network addresses from capture text."""
+        for rx in cls._REDACT_RES[:-1]:
+            text = rx.sub("[REDACTED]", text)
+        text = cls._REDACT_RES[-1].sub("[redacted-ip]", text)
+        return text
+
     def __init__(self):
         self._client: Optional[MCPClient] = None
         self._session_id: str = ""
         self._agent_context: str = "primary"
+        self._agent_label: str = "default"
         self._workspace_hash: str = ""
         self._enabled: bool = False
         self._prefetched: str = ""
         self._prefetch_lock = threading.Lock()
         self._turn_buffer: List[Dict[str, str]] = []
+        self._captured_hashes: set = set()
+        self._pre_compress_ran: bool = False
         self._config: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
@@ -1747,6 +1769,9 @@ class PerseusVaultProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._session_id = session_id
         self._agent_context = kwargs.get("agent_context", "primary")
+        self._agent_label = (kwargs.get("agent_id")
+                             or os.environ.get("HERMES_PROFILE")
+                             or "default")
         self._load_config()
         if not self._config.get("api_key"):
             logger.warning(
@@ -1909,36 +1934,62 @@ class PerseusVaultProvider(MemoryProvider):
             return
         if self._agent_context != "primary":
             return  # cron/subagent sessions would pollute shared memory
-        source = messages if messages else [
-            {"role": "user", "content": t["user"]} for t in self._turn_buffer
-        ]
+        if self._pre_compress_ran:
+            # Pre-compress already captured everything up to that point;
+            # capture ONLY the turns accumulated after it (dedupe).
+            entries = []
+            for t in self._turn_buffer:
+                if t["user"]:
+                    entries.append(("USER", t["user"]))
+                if t["assistant"]:
+                    entries.append(("ASSISTANT", t["assistant"]))
+            if not entries:
+                return
+        else:
+            source = messages if messages else [
+                {"role": "user", "content": t["user"]} for t in self._turn_buffer
+            ]
+            entries = [(str(msg.get("role", "")).upper(), msg.get("content") or "")
+                       for msg in source]
         text_parts: List[str] = []
         total = 0
-        for msg in source:
-            role = msg.get("role", "")
-            if role not in ("user", "assistant"):
+        for role, content in entries:
+            if role not in ("USER", "ASSISTANT"):
                 continue
-            content = msg.get("content") or ""
             if not isinstance(content, str) or not content.strip():
                 continue
-            chunk = f"{role.upper()}: {content.strip()}"
+            chunk = f"{role}: {self._redact(content.strip())}"
             if total + len(chunk) > _SESSION_CAPTURE_MAX_CHARS:
                 break
             text_parts.append(chunk)
             total += len(chunk)
         if not text_parts:
             return
+        # Session-keyed preamble: the capture distiller derives keys from
+        # headlines, so a constant preamble collided across every session
+        # (interference >=0.9 -> write-quarantine flood).
         transcript = (
-            "Session transcript to distill into durable memories "
+            f"[session {self._session_id[:12]}] Session transcript to distill "
+            "into durable memories "
             "(facts, decisions, corrections, lessons only; skip chit-chat; "
             "never include secret values):\n\n" + "\n\n".join(text_parts)
         )
-        try:
-            self._client.call_tool(
-                "perseus_vault_capture",
-                {"text": transcript, "max_entities": 5},
-                timeout=60)
+        digest = hashlib.sha1(transcript.encode()).hexdigest()[:12]
+        if digest in self._captured_hashes:
             self._turn_buffer.clear()
+            return
+        try:
+            res = self._client.call_tool(
+                "perseus_vault_capture",
+                {"text": transcript, "max_entities": 5,
+                 "agent_id": self._agent_label},
+                timeout=15)
+            if res.get("ok"):
+                self._captured_hashes.add(digest)
+                self._turn_buffer.clear()
+            else:
+                logger.warning("perseus-vault session capture rejected: %s",
+                               res.get("text", "")[:200])
         except Exception as e:
             logger.warning("perseus-vault session capture failed: %s", e)
 
@@ -1946,16 +1997,31 @@ class PerseusVaultProvider(MemoryProvider):
         """Best-effort capture before context compression; never blocks."""
         if not self._enabled or not self._client or not messages:
             return ""
+        if self._agent_context != "primary":
+            return ""  # cron/subagent sessions would pollute shared memory
         try:
             session_text = "\n".join(
-                f"{m.get('role', 'unknown')}: {str(m.get('content', ''))[:400]}"
+                f"{m.get('role', 'unknown')}: "
+                f"{self._redact(str(m.get('content', ''))[:400])}"
                 for m in messages[-30:])
-            self._client.call_tool(
+            digest = hashlib.sha1(session_text.encode()).hexdigest()[:12]
+            if digest in self._captured_hashes:
+                return ""
+            res = self._client.call_tool(
                 "perseus_vault_capture",
                 {"text": session_text[:_SESSION_CAPTURE_MAX_CHARS],
-                 "max_entities": 5},
-                timeout=30)
-            return "Session insights captured to Vault"
+                 "max_entities": 5, "agent_id": self._agent_label},
+                timeout=10)
+            if res.get("ok"):
+                self._captured_hashes.add(digest)
+                self._pre_compress_ran = True
+                # Turns up to here are captured; only post-compress turns
+                # should be re-captured at session end (dedupe).
+                self._turn_buffer.clear()
+                return "Session insights captured to Vault"
+            logger.warning("perseus-vault pre-compress capture rejected: %s",
+                           res.get("text", "")[:200])
+            return ""
         except Exception:
             return ""
 

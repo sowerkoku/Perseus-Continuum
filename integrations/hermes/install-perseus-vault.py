@@ -153,6 +153,7 @@ import logging
 import os
 import re
 import threading
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -1693,6 +1694,20 @@ class PerseusVaultProvider(MemoryProvider):
         text = cls._REDACT_RES[-1].sub("[redacted-ip]", text)
         return text
 
+    @staticmethod
+    def _deaccent(text: str) -> str:
+        """Fold Latin accents to ASCII (diseñar -> disenar).
+
+        Mitigates the server preview_cap panic: byte-indexed truncation
+        inside a multi-byte UTF-8 char kills the request (HTTP 500) and
+        Spanish text hits it ~1/3 of the time. Only combining marks are
+        stripped, so emoji/CJK pass through untouched; ASCII fast-path
+        keeps the call free for English content."""
+        if text.isascii():
+            return text
+        return "".join(c for c in unicodedata.normalize("NFKD", text)
+                       if not unicodedata.combining(c))
+
     def __init__(self):
         self._client: Optional[MCPClient] = None
         self._session_id: str = ""
@@ -1968,12 +1983,11 @@ class PerseusVaultProvider(MemoryProvider):
         # Session-keyed preamble: the capture distiller derives keys from
         # headlines, so a constant preamble collided across every session
         # (interference >=0.9 -> write-quarantine flood).
-        transcript = (
+        transcript = self._deaccent(
             f"[session {self._session_id[:12]}] Session transcript to distill "
             "into durable memories "
             "(facts, decisions, corrections, lessons only; skip chit-chat; "
-            "never include secret values):\n\n" + "\n\n".join(text_parts)
-        )
+            "never include secret values):\n\n" + "\n\n".join(text_parts))
         digest = hashlib.sha1(transcript.encode()).hexdigest()[:12]
         if digest in self._captured_hashes:
             self._turn_buffer.clear()
@@ -2000,10 +2014,10 @@ class PerseusVaultProvider(MemoryProvider):
         if self._agent_context != "primary":
             return ""  # cron/subagent sessions would pollute shared memory
         try:
-            session_text = "\n".join(
+            session_text = self._deaccent("\n".join(
                 f"{m.get('role', 'unknown')}: "
                 f"{self._redact(str(m.get('content', ''))[:400])}"
-                for m in messages[-30:])
+                for m in messages[-30:]))
             digest = hashlib.sha1(session_text.encode()).hexdigest()[:12]
             if digest in self._captured_hashes:
                 return ""
@@ -2039,7 +2053,7 @@ class PerseusVaultProvider(MemoryProvider):
                     "category": category,
                     "key": key,
                     "body_json": json.dumps({
-                        "summary": content[:600],
+                        "summary": self._deaccent(content[:600]),
                         "source": "hermes-builtin-memory",
                         "target": target,
                     }),
@@ -2075,6 +2089,30 @@ class PerseusVaultProvider(MemoryProvider):
                                         f"the perseus-vault provider"})
         try:
             call_args = dict(args or {})
+            # Accent-fold on the write path: entities this plugin stores then
+            # never carry a multi-byte char at the preview-cap byte boundary.
+            # body_json arrives as a JSON *string* (often with \uXXXX escapes),
+            # so fold inside the decoded values, not over the serialized text.
+            if tool_name == "perseus_vault_remember" and isinstance(
+                    call_args.get("body_json"), str):
+                try:
+                    def _fold(o):
+                        if isinstance(o, str):
+                            return self._deaccent(o)
+                        if isinstance(o, dict):
+                            return {k: _fold(v) for k, v in o.items()}
+                        if isinstance(o, list):
+                            return [_fold(v) for v in o]
+                        return o
+                    call_args["body_json"] = json.dumps(
+                        _fold(json.loads(call_args["body_json"])),
+                        ensure_ascii=False)
+                except ValueError:
+                    call_args["body_json"] = self._deaccent(
+                        call_args["body_json"])
+            elif tool_name == "perseus_vault_capture" and isinstance(
+                    call_args.get("text"), str):
+                call_args["text"] = self._deaccent(call_args["text"])
             if tool_name in ("perseus_vault_recall", "perseus_vault_recall_when",
                              "perseus_vault_semantic_search", "perseus_vault_context",
                              "perseus_vault_remember", "perseus_vault_forget",

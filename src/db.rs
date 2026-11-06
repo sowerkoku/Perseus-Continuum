@@ -12242,8 +12242,16 @@ impl Database {
             if let Some(cap) = params.preview_cap {
                 let cap = cap as usize;
                 if entity.body_json.len() > cap {
-                    let extra = entity.body_json.len() - cap;
-                    let truncated = entity.body_json[..cap].to_string();
+                    // Byte-indexed slicing panics when `cap` lands inside a
+                    // multi-byte UTF-8 char (e.g. preview_cap=400 over a body
+                    // with 'ó' at bytes 399..401). Walk back to the nearest
+                    // char boundary before slicing.
+                    let mut end = cap;
+                    while !entity.body_json.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    let extra = entity.body_json.len() - end;
+                    let truncated = entity.body_json[..end].to_string();
                     let footer = format!(
                         "\n--truncated ({} more chars)-- full body: get_entity(\"{}\"). If large, delegate_to_subagent to read/extract it without polluting this context.",
                         extra, entity.id

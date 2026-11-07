@@ -73,6 +73,60 @@ class FakeClient:
         return hits[nth] if len(hits) > nth else None
 
 
+class FakeVault:
+    """Stateful in-memory vault: remembers by (category,key), recalls with
+    category + ref filters. Exercises the provider against real state."""
+
+    def __init__(self):
+        self.store = {}          # (category,key) -> {status, body(dict), args}
+        self.calls = []
+        self.captured = []       # texts passed to capture
+        self.fail_marks = False  # reject checkpoint-consumption writes
+
+    def call_tool(self, name, arguments=None, timeout=30.0):
+        a = dict(arguments or {})
+        self.calls.append((name, a))
+        if name == "perseus_vault_remember":
+            ck = (a["category"], a["key"])
+            if self.fail_marks and a["category"] == "checkpoint" \
+                    and a.get("status") == "deprecated":
+                return {"ok": False, "text": "mark rejected", "data": None}
+            try:
+                body = json.loads(a.get("body_json") or "{}")
+            except Exception:
+                body = {}
+            self.store[ck] = {"status": a.get("status", "active"),
+                              "body": body, "args": a}
+            return {"ok": True, "text": "", "data": None}
+        if name == "perseus_vault_recall":
+            hits = []
+            for (cat, key), ent in self.store.items():
+                if cat != a.get("category"):
+                    continue
+                rt, rv = a.get("ref_type"), a.get("ref_value")
+                if rt or rv:
+                    refs = ent["args"].get("external_refs") or \
+                        ent["body"].get("external_refs") or []
+                    if not any(r.get("ref_type") == rt and
+                               str(r.get("ref_value", "")).startswith(str(rv or ""))
+                               for r in refs):
+                        continue
+                hits.append({"key": key, "id": key, "status": ent["status"],
+                             "body_json": json.dumps(ent["body"])})
+            return {"ok": True, "text": "", "data": {"results": hits}}
+        if name == "perseus_vault_capture":
+            self.captured.append(a["text"])
+            return {"ok": True, "text": "", "data": {"captured": 1}}
+        return {"ok": True, "text": "", "data": None}
+
+    def status_of(self, category, key):
+        ent = self.store.get((category, key))
+        return ent["status"] if ent else None
+
+    def count(self, tool):
+        return sum(1 for (n, _) in self.calls if n == tool)
+
+
 def make_provider(mod, session_label="chat-77", agent_label="default",
                  agent_context="primary", session_id="20261107_sess"):
     p = mod.PerseusVaultProvider()
@@ -244,24 +298,29 @@ def main():
         p._turn_buffer.append({"user": "u1", "assistant": "a1"})
         p.on_session_end([])
         receipts = [a for (n, a) in p._client.calls
-                    if n == "perseus_vault_remember" and a.get("category") == "hermes-capture-receipt"]
-        assert receipts, "first run must write a distillation receipt"
-        receipt_key = receipts[0]["key"]
-        # replay after crash (drafts still there, receipt present)
-        draft2 = {"results": [{"key": "ckpt-bbb-222", "status": "draft",
-                               "body_json": json.dumps({"evidence": "evidencia"})}]}
+                    if n == "perseus_vault_remember"
+                    and a.get("category") == "hermes-capture-receipt"]
+        assert receipts, "first run must persist a consume-receipt"
+        rbody = json.loads(receipts[0]["body_json"])
+        assert rbody.get("consumed_checkpoint") == "ckpt-bbb-222", rbody
+        # replay after restart: the draft is STILL draft (marking never
+        # ran), but its consume-receipt proves the content is durable:
+        # the replay must NOT re-distill, only retry the marking.
         p2 = make_provider(mod)
         p2._client = FakeClient({"perseus_vault_recall": [
-            {"ok": True, "text": "", "data": draft2},
-            {"ok": True, "text": "", "data": {"results": [{"key": receipt_key,
-                                                           "status": "active", "body_json": "{}"}]}}]})
-        p2._turn_buffer.append({"user": "u1", "assistant": "a1"})
-        p2.on_session_end([])
+            {"ok": True, "text": "", "data": draft},
+            {"ok": True, "text": "", "data": {"results": [
+                {"key": "consume-x", "status": "active",
+                 "body_json": json.dumps(
+                     {"consumed_checkpoint": "ckpt-bbb-222"})}]}}]})
+        p2.on_session_end([])  # empty buffer = post-restart replay
         assert "perseus_vault_capture" not in p2._client.names(), \
-            "receipt must short-circuit re-distillation (idempotent recovery)"
-        dep = p2._client.args_for("perseus_vault_remember")
-        assert dep and dep["status"] == "deprecated", "still (idempotently) consumes checkpoints"
-    check("C5 idempotent recovery via content-keyed receipt", c5)
+            "consume-receipt must short-circuit re-distillation"
+        deps = [a for (n, a) in p2._client.calls
+                if n == "perseus_vault_remember" and a.get("category") == "checkpoint"]
+        assert deps and deps[0]["status"] == "deprecated", \
+            "marking must still be completed (idempotently)"
+    check("C5 item-level idempotent recovery via consume-receipt", c5)
 
     # ---- C6 regression: fixes 0001/0002 coexist with 0003 ----
     def c6():
@@ -284,6 +343,151 @@ def main():
         assert "sk-abcdefghij1234" not in tx and "[REDACTED]" in tx
         assert "disenar" in tx and "diseñar" not in tx
     check("C6 redaction + accent-fold + session-keys coexist (0001/0002)", c6)
+
+    # ---- D (audit A): subagent checkpoints are recovered by the parent ----
+    def d():
+        vault = FakeVault()
+        pf = make_provider(mod, session_label="gw-A", agent_context="subagent")
+        pf._client = vault
+        out = pf.on_pre_compress([
+            {"role": "user", "content": "investiga precios del vendor"},
+            {"role": "assistant",
+             "content": "HALLAZGO FORK: el vendor cambia precios los martes"}])
+        ck = out.split(": ", 1)[1]
+        # a subagent never distills
+        assert vault.count("perseus_vault_capture") == 0
+        # the parent session-end recovers the fork evidence via session ref
+        pp = make_provider(mod, session_label="gw-A")
+        pp._client = vault
+        pp._turn_buffer.append({"user": "cierre de semana", "assistant": "ok"})
+        pp.on_session_end([])
+        assert vault.captured, "parent must distill"
+        assert "HALLAZGO FORK" in vault.captured[-1], \
+            "fork evidence must flow into the parent distillation"
+        assert vault.status_of("checkpoint", ck) == "deprecated", \
+            "fork checkpoint must be consumed by the parent"
+        # a DIFFERENT chat must not see it (isolation across sessions)
+        vault2 = FakeVault()
+        for k, ent in vault.store.items():
+            vault2.store[k] = ent
+        po = make_provider(mod, session_label="gw-OTHER")
+        po._client = vault2
+        po._turn_buffer.append({"user": "otra sesion", "assistant": "fin"})
+        po.on_session_end([])
+        assert "HALLAZGO FORK" not in vault2.captured[-1], "session isolation"
+    check("D subagent checkpoint recovered by parent, not self-distilled", d)
+
+    # ---- E (audit B): receipt ordering, invalid/incomplete receipt,
+    #      marking failure recovery, duplicate-distillation guard ----
+    def e():
+        # E1: receipt written ONLY after capture ok (rejected -> no receipt)
+        vault = FakeVault()
+        p = make_provider(mod, session_label="gw-B")
+        p._client = vault
+        p.on_pre_compress(MSGS)
+        names0 = [n for (n, _) in vault.calls]
+        p._turn_buffer.append({"user": "u", "assistant": "a"})
+        orig = vault.call_tool
+        def reject_capture(name, arguments=None, timeout=30.0):
+            if name == "perseus_vault_capture":
+                vault.calls.append((name, dict(arguments or {})))
+                return {"ok": False, "text": "rejected", "data": None}
+            return orig(name, arguments, timeout)
+        vault.call_tool = reject_capture
+        p.on_session_end([])
+        vault.call_tool = orig
+        assert not any(n == "perseus_vault_remember"
+                       and a.get("category") == "hermes-capture-receipt"
+                       for (n, a) in vault.calls), "no receipt on failed distill"
+        ck_keys = [k for (c, k) in vault.store if c == "checkpoint"]
+        assert all(vault.status_of("checkpoint", k) == "draft" for k in ck_keys), \
+            "checkpoints stay draft when distillation failed"
+        # E2: successful run -> receipt exists with session ref; mark fails ->
+        # checkpoints stay draft WITHOUT crashing
+        vault2 = FakeVault()
+        p2 = make_provider(mod, session_label="gw-C")
+        p2._client = vault2
+        p2.on_pre_compress(MSGS)
+        vault2.fail_marks = True
+        p2._turn_buffer.append({"user": "u2", "assistant": "a2"})
+        p2.on_session_end([])  # must not raise
+        assert any(n == "perseus_vault_remember"
+                   and a.get("category") == "hermes-capture-receipt"
+                   for (n, a) in vault2.calls), "receipt written after persist"
+        ck2 = [k for (c, k) in vault2.store if c == "checkpoint"]
+        assert all(vault2.status_of("checkpoint", k) == "draft" for k in ck2)
+        # E3: replay (fresh instance) -> receipt found via session ref -> NO
+        # second distillation, but the marking is RETRIED and completes
+        p3 = make_provider(mod, session_label="gw-C")
+        p3._client = vault2
+        vault2.fail_marks = False
+        p3.on_session_end([])
+        assert vault2.count("perseus_vault_capture") == 1, \
+            "receipt must prevent duplicate distillation on replay"
+        assert all(vault2.status_of("checkpoint", k) == "deprecated" for k in ck2), \
+            "marking retried and completed on replay"
+    check("E receipt ordering + failed-mark recovery + no duplicate distill", e)
+
+    # ---- F (audit C): full post-restart recovery, 8 steps, real initialize() ----
+    def f():
+        class StubMCP:
+            def __init__(self, *a, **k): pass
+            def initialize(self): return {}
+            def list_tools(self): return []
+        orig_mcp = mod.MCPClient
+        mod.MCPClient = StubMCP
+        try:
+            vault = FakeVault()
+            # 1) session A (process 1) creates checkpoints
+            p1 = make_provider(mod, session_label="gw-R", session_id="20261107proc1")
+            p1._client = vault
+            p1.on_pre_compress([
+                {"role": "user", "content": "confirmar respaldo incremental nightly"},
+                {"role": "assistant", "content": "RESPALDO CONFIRMADO: incremental nightly 02:00"}])
+            cks = [k for (c, k) in vault.store if c == "checkpoint"]
+            assert cks and all(vault.status_of("checkpoint", k) == "draft" for k in cks)
+            # 2) Hermes restarts: process 1 gone
+            del p1
+            # 3+4) session resumes: NEW session_id, SAME gateway key,
+            #      resumed=True — through the REAL initialize() code path
+            p2 = mod.PerseusVaultProvider()
+            p2._load_config = lambda: p2._config.update(
+                {"api_key": "tok", "url": "http://fake"})
+            p2.initialize("20261107proc2",
+                          gateway_session_key="gw-R", resumed=True)
+            assert p2._enabled and p2._resumed
+            assert p2._session_label == "gw-R", \
+                "identity must come from gateway_session_key, not session_id"
+            p2._client = vault  # keep the stateful vault
+            # 5) previous checkpoints still associated with this session
+            drafts = p2._draft_checkpoints()
+            assert len(drafts) == len(cks), "all drafts must be found post-restart"
+            # 6) on_session_end uses them as evidence
+            p2.on_session_end([])
+            assert vault.captured and "RESPALDO CONFIRMADO" in vault.captured[-1]
+            # 7) receipt recorded (session-scoped)
+            receipts = [a for (n, a) in vault.calls
+                        if n == "perseus_vault_remember"
+                        and a.get("category") == "hermes-capture-receipt"]
+            assert receipts, "receipt must exist"
+            assert any(r.get("ref_type") == "hermes_session"
+                       and r.get("ref_value") == "gw-R"
+                       for r in receipts[0].get("external_refs", [])), \
+                "receipt must be session-scoped"
+            # 8) checkpoints consumed
+            assert all(vault.status_of("checkpoint", k) == "deprecated" for k in cks)
+            # bonus: second session-end after full success -> no re-distill
+            p3 = mod.PerseusVaultProvider()
+            p3._load_config = lambda: p3._config.update(
+                {"api_key": "tok", "url": "http://fake"})
+            p3.initialize("20261107proc3", gateway_session_key="gw-R", resumed=True)
+            p3._client = vault
+            p3.on_session_end([])
+            assert vault.count("perseus_vault_capture") == 1, \
+                "fully-completed recovery must not re-distill"
+        finally:
+            mod.MCPClient = orig_mcp
+    check("F full 8-step post-restart recovery (real initialize path)", f)
 
     width = max(len(n) for n, _, _ in results)
     failed = 0

@@ -107,6 +107,19 @@ docs, "Pre-Compress Checkpoints (fail-closed)". The provider declares
   tool output are not preserved by the checkpoint path — the v2
   normalization excludes tool rows. The final distillation remains the
   semantic layer.
+- **Sub-agent retention/recovery policy (explicit):** forks write
+  checkpoints (scope-tagged `agent_context`) but never distill. All
+  checkpoints of a chat carry `external_refs[hermes_session] =
+  gateway_session_key`, so a fork's evidence is **recovered by the
+  parent session's final distillation** (the parent's replay filter is
+  the session ref, not the context). If the parent never runs, drafts
+  decay (importance 0.3) and are archived by the server lifecycle —
+  subagents are never autonomous sources of definitive memory.
+- Concurrency: sequential replay is idempotent via the session-scoped
+  receipt; two *simultaneous* session-ends of the same chat could both
+  distill (no distributed lease exists in the 9-tool allowlist). The
+  host serializes session-end per session in current deployments —
+  revisit if that ever changes.
 
 ### 4. SessionStop — `on_session_end(messages)`
 
@@ -121,10 +134,15 @@ read draft checkpoints ─▶ use as evidence ─▶ distill (capture ≤5)
   checkpoints of the session** — this is also the post-restart recovery
   path, since `gateway_session_key` survives restarts) is distilled via
   `perseus_vault_capture(max_entities=5)`.
-- A content-keyed **distillation receipt** (`hermes-capture-receipt`)
-  makes a replayed session-end idempotent: if a crash happened between
-  distilling and marking, the replay skips re-distillation and only
-  completes the marking.
+- Per-checkpoint **consume-receipts** (`hermes-capture-receipt`, body
+  `consumed_checkpoint`, tagged with the session ref so lookup is
+  bounded) provide **item-level** idempotent recovery: a receipt is
+  written only after verified capture persistence, and a replayed
+  session-end skips already-receipted checkpoints (no re-distillation)
+  while still retrying the consumption marking. A receipt keyed on the
+  whole-transcript digest would never survive a restart (new
+  `session_id`, lost turn buffer), which is why receipts are keyed per
+  checkpoint instead.
 - Runs only for `primary` agent contexts (cron/subagent sessions are
   skipped to avoid polluting shared memory). It does **not** run a
   global `consolidate` — that is the server's nightly `maintain` cron

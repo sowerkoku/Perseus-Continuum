@@ -86,6 +86,7 @@ class FakeVault:
         self.reject_capture = False
         # fail the Nth (0-based) recall call per category
         self.fail_recall_call_index = {}
+        self.raise_recall_call_index = {}
         self._recall_counts = {}
 
     def call_tool(self, name, arguments=None, timeout=30.0):
@@ -113,6 +114,8 @@ class FakeVault:
             self._recall_counts[cat] = idx + 1
             if self.fail_recall_call_index.get(cat) == idx:
                 return {"ok": False, "text": "read error", "data": None}
+            if self.raise_recall_call_index.get(cat) == idx:
+                raise ConnectionError("connection reset")
             hits = []
             for (cat, key), ent in self.store.items():
                 if cat != a.get("category"):
@@ -484,7 +487,8 @@ def main():
                 "identity must come from gateway_session_key, not session_id"
             p2._client = vault  # keep the stateful vault
             # 5) previous checkpoints still associated with this session
-            drafts = p2._draft_checkpoints()
+            drafts, dstate = p2._draft_checkpoints()
+            assert dstate == "complete"
             assert len(drafts) == len(cks), "all drafts must be found post-restart"
             # 6) on_session_end uses them as evidence
             p2.on_session_end([])
@@ -527,8 +531,9 @@ def main():
                  "content": "HECHO-%02d %s" % (i, "x" * 400)}])
             keys.append(out.split(": ", 1)[1])
         assert len(set(keys)) == 25
-        assert len(p._draft_checkpoints()) == 25, \
-            "no silent truncation at 20 (R3)"
+        dlist, dstate = p._draft_checkpoints()
+        assert dstate == "complete" and len(dlist) == 25, \
+            "no silent truncation at 20; state must be COMPLETE (R3)"
         st = None
         for _round in range(10):
             pr = make_provider(mod, session_label="gw-G")
@@ -552,8 +557,8 @@ def main():
                                             "ref_value": "gw-G"}]}}
         pn = make_provider(mod, session_label="gw-G")
         pn._client = vault
-        got, comp = pn._consumed_checkpoint_keys()
-        assert comp, "full pagination must report completeness"
+        got, rstate = pn._consumed_checkpoint_keys()
+        assert rstate == "complete", "full pagination must report COMPLETE"
         assert len(got) == 145, \
             "receipt lookups must paginate beyond 100 (R3)"
     check("G full pagination: 25 drafts + 120 receipts, each distilled once", g)
@@ -714,6 +719,99 @@ def main():
             "clean retry completes the marking WITHOUT re-distilling \n" \
             "(the intact receipt proves round-1 persistence)"
     check("L partial receipt read fails the cycle closed, then resumes", l_)
+
+    # ---- N (R3 tri-state): a RAISED exception on a page (transport
+    #      failure, vs L's ok:false rejection) also yields FAILED and
+    #      must abort the cycle, then recover cleanly. ----
+    def n():
+        vault = FakeVault()
+        p = make_provider(mod, session_label="gw-N")
+        p._client = vault
+        k0 = p.on_pre_compress([
+            {"role": "user", "content": "n0"},
+            {"role": "assistant", "content": "HECHO-N0 base"}]
+        ).split(": ", 1)[1]
+        p.on_session_end([])
+        assert vault.status_of("checkpoint", k0) == "deprecated"
+        for i in range(60):
+            vault.store[("hermes-capture-receipt", "nrx-%d" % i)] = {
+                "status": "active",
+                "body": {"consumed_checkpoint": "ckpt-n-%d" % i},
+                "args": {"external_refs": [{"ref_type": "hermes_session",
+                                            "ref_value": "gw-N"}]}}
+        k2 = p.on_pre_compress([
+            {"role": "user", "content": "n2"},
+            {"role": "assistant", "content": "HECHO-N2 pendiente"}]
+        ).split(": ", 1)[1]
+        pn = make_provider(mod, session_label="gw-N")
+        pn._client = vault
+        vault.raise_recall_call_index = {"hermes-capture-receipt": 1}
+        _, st_exc = pn._consumed_checkpoint_keys()
+        assert st_exc == "failed", "raised page must report FAILED"
+        vault.raise_recall_call_index = {}
+        vault._recall_counts = {}
+        vault.fail_recall_call_index = {"hermes-capture-receipt": 1}
+        _, st_rej = pn._consumed_checkpoint_keys()
+        assert st_rej == "failed", "rejected page must report FAILED"
+        vault.fail_recall_call_index = {}
+        vault._recall_counts = {}
+        caps_before = vault.count("perseus_vault_capture")
+        vault.raise_recall_call_index = {"hermes-capture-receipt": 1}
+        pn.on_session_end([])
+        assert vault.count("perseus_vault_capture") == caps_before, \
+            "raised page must NOT distill"
+        assert vault.status_of("checkpoint", k2) == "draft", \
+            "raised page must NOT consume"
+        vault.raise_recall_call_index = {}
+        vault._recall_counts = {}
+        p2 = make_provider(mod, session_label="gw-N")
+        p2._client = vault
+        p2.on_session_end([])
+        assert vault.status_of("checkpoint", k2) == "deprecated"
+    check("N raised page = FAILED; aborts cycle, then resumes clean", n)
+
+    # ---- M (R3 tri-state): the defensive cap yields TRUNCATED, which
+    #      must be treated as failure: cycle aborts, nothing consumed.
+    #      The cap is a protection, never a license to process. ----
+    def m():
+        vault = FakeVault()
+        p = make_provider(mod, session_label="gw-M")
+        p._client = vault
+        k0 = p.on_pre_compress([
+            {"role": "user", "content": "m0"},
+            {"role": "assistant", "content": "HECHO-M0 base"}]
+        ).split(": ", 1)[1]
+        p.on_session_end([])
+        assert vault.status_of("checkpoint", k0) == "deprecated"
+        # pad receipts above the (temporarily lowered) safety cap
+        for i in range(99):
+            vault.store[("hermes-capture-receipt", "mrx-%d" % i)] = {
+                "status": "active",
+                "body": {"consumed_checkpoint": "ckpt-pad-%d" % i},
+                "args": {"external_refs": [{"ref_type": "hermes_session",
+                                            "ref_value": "gw-M"}]}}
+        k2 = p.on_pre_compress([
+            {"role": "user", "content": "m2"},
+            {"role": "assistant", "content": "HECHO-M2 pendiente"}]
+        ).split(": ", 1)[1]
+        p2 = make_provider(mod, session_label="gw-M")
+        p2._client = vault
+        p2._RECALL_MAX_ITEMS = 50          # force TRUNCATED (100 receipts)
+        _, rstate = p2._consumed_checkpoint_keys()
+        assert rstate == "truncated", \
+            "cap hit must report TRUNCATED, not a usable partial"
+        caps_before = vault.count("perseus_vault_capture")
+        p2.on_session_end([])
+        assert vault.count("perseus_vault_capture") == caps_before, \
+            "TRUNCATED must NOT distill"
+        assert vault.status_of("checkpoint", k2) == "draft", \
+            "TRUNCATED must NOT consume anything"
+        # restore a complete read: item completes normally
+        p3 = make_provider(mod, session_label="gw-M")
+        p3._client = vault
+        p3.on_session_end([])
+        assert vault.status_of("checkpoint", k2) == "deprecated"
+    check("M cap=TRUNCATED aborts the cycle; never processed as complete", m)
 
     width = max(len(n) for n, _, _ in results)
     failed = 0

@@ -2063,14 +2063,16 @@ class PerseusVaultProvider(MemoryProvider):
 
     def _recall_pages(self, args_base: dict) -> List[Any]:
         """Paginate a recall until a SHORT page. Returns
-        (hits, complete) — complete=False whenever the enumeration did
-        NOT provably cover the whole result set (read error, rejected
-        page, or safety-cap truncation). Callers MUST treat an
-        incomplete read as UNKNOWN state, never as a valid partial
-        answer (R3)."""
+        (hits, state) with state EXPLICITLY one of:
+          "complete"   — every page was retrieved (short page reached)
+          "failed"     — a page raised or was rejected (ok=False)
+          "truncated"  — the defensive _RECALL_MAX_ITEMS cap was hit
+        The cap is a PROTECTION, never a license to continue:
+        TRUNCATED is treated like a failure by callers. An incomplete
+        read is UNKNOWN state, never a valid partial answer (R3)."""
         hits: List[Any] = []
         offset = 0
-        complete = True
+        state = "complete"
         while offset < self._RECALL_MAX_ITEMS:
             a = dict(args_base)
             a["limit"] = self._RECALL_PAGE
@@ -2079,10 +2081,10 @@ class PerseusVaultProvider(MemoryProvider):
                 res = self._client.call_tool("perseus_vault_recall", a,
                                              timeout=10)
             except Exception:
-                complete = False
+                state = "failed"
                 break
             if not res.get("ok"):
-                complete = False
+                state = "failed"
                 break
             batch = self._recall_hits(res)
             hits.extend(batch)
@@ -2090,11 +2092,11 @@ class PerseusVaultProvider(MemoryProvider):
                 break
             offset += self._RECALL_PAGE
         else:
-            complete = False
+            state = "truncated"
             logger.warning(
                 "perseus-vault: recall pagination hit safety cap %d (%s)",
                 self._RECALL_MAX_ITEMS, args_base.get("category"))
-        return hits, complete
+        return hits, state
 
     def _draft_checkpoints(self) -> List[Any]:
         """Unconsumed (status=draft) checkpoints for THIS session scope
@@ -2102,17 +2104,18 @@ class PerseusVaultProvider(MemoryProvider):
         if not self._session_label:
             return []
         out: List[Any] = []
-        raw, complete = self._recall_pages(
+        raw, state = self._recall_pages(
             {"query": "", "category": self._CHECKPOINT_CATEGORY,
              "ref_type": "hermes_session",
              "ref_value": self._session_label})
-        if not complete:
-            # Drafts beyond the failure point are simply not seen this
-            # cycle: they stay draft and are recovered by a later
-            # session-end — a missed draft can only DELAY, never lose.
+        if state != "complete":
+            # R3 rule: an incomplete recovery (FAILED or TRUNCATED) is
+            # never processed as if it were complete. on_session_end
+            # aborts the cycle; nothing is lost — drafts are re-read
+            # fully by the next cycle.
             logger.warning(
-                "perseus-vault: draft-checkpoint listing INCOMPLETE; "
-                "unseen drafts remain queued for a later cycle")
+                "perseus-vault: draft-checkpoint listing %s; "
+                "consumption cycle will be aborted", state.upper())
         for h in raw:
             if not isinstance(h, dict) or h.get("status") != "draft":
                 continue
@@ -2124,7 +2127,7 @@ class PerseusVaultProvider(MemoryProvider):
                     continue
             if isinstance(body, dict) and body.get("evidence"):
                 out.append((h.get("key") or h.get("id") or "", body))
-        return out
+        return out, state
 
     @staticmethod
     def _recall_hits(res: dict) -> List[Any]:
@@ -2144,16 +2147,16 @@ class PerseusVaultProvider(MemoryProvider):
         transcript can never reproduce the pre-crash transcript digest,
         which is why a transcript-keyed receipt was the wrong identity.
 
-        Returns (keys, complete): complete=False when the receipt set
-        is UNKNOWN beyond a failure point. An incomplete receipt
-        lookup must never decide what is safe to distill — items whose
-        receipts sit on the unread pages would be re-distilled. Callers
-        must fail the cycle closed instead of proceeding."""
+        Returns (keys, state) with state "complete"/"failed"/
+        "truncated" (see _recall_pages). An incomplete receipt lookup
+        must never decide what is safe to distill — items whose
+        receipts sit on the unread pages would be re-distilled.
+        Callers must fail the cycle closed instead of proceeding."""
         if not self._session_label:
-            return set(), True
+            return set(), "complete"
         out = set()
         try:
-            raw, complete = self._recall_pages(
+            raw, state = self._recall_pages(
                 {"query": "", "category": self._RECEIPT_CATEGORY,
                  "ref_type": "hermes_session",
                  "ref_value": self._session_label})
@@ -2169,8 +2172,8 @@ class PerseusVaultProvider(MemoryProvider):
                 if isinstance(body, dict) and body.get("consumed_checkpoint"):
                     out.add(str(body["consumed_checkpoint"]))
         except Exception:
-            return out, False
-        return out, complete
+            return out, "failed"
+        return out, state
 
     def _write_consume_receipts(self, processed: List[Any]) -> List[Any]:
         """Called ONLY after the capture call persisted successfully.
@@ -2254,19 +2257,18 @@ class PerseusVaultProvider(MemoryProvider):
             return
         if self._agent_context != "primary":
             return  # cron/subagent sessions would pollute shared memory
-        checkpoints = self._draft_checkpoints()
-        already, receipts_complete = self._consumed_checkpoint_keys()
-        if not receipts_complete:
-            # R3 fail-closed: the consume-receipt set could not be read
-            # completely, so "what is already distilled" is UNKNOWN.
-            # Distilling now could silently re-distill items whose
-            # receipts sit on the unread pages. Aborting loses nothing:
-            # checkpoints stay draft, the turn buffer is NOT cleared,
-            # and the next session-end retries the whole cycle.
+        checkpoints, ck_state = self._draft_checkpoints()
+        already, rc_state = self._consumed_checkpoint_keys()
+        if ck_state != "complete" or rc_state != "complete":
+            # R3 fail-closed, explicit tri-state: a recovery is
+            # processed ONLY when provably COMPLETE. FAILED or
+            # TRUNCATED on either lookup aborts the cycle: no
+            # capture, no receipts, no marking, buffer untouched.
+            # Nothing is lost — the next session-end re-reads fully.
             logger.warning(
-                "perseus-vault: consume-receipt lookup INCOMPLETE — "
-                "aborting consumption cycle (no distill, no consume); "
-                "state preserved for a later retry")
+                "perseus-vault: recovery incomplete (checkpoints=%s, "
+                "receipts=%s) — aborting consumption cycle; state "
+                "preserved for a later retry", ck_state, rc_state)
             return
         fresh = [(k, b) for (k, b) in checkpoints if k and k not in already]
         entries = []

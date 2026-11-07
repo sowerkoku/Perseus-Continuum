@@ -82,6 +82,8 @@ class FakeVault:
         self.calls = []
         self.captured = []       # texts passed to capture
         self.fail_marks = False  # reject checkpoint-consumption writes
+        self.reject_receipts = 0  # reject N next receipt writes
+        self.reject_capture = False
 
     def call_tool(self, name, arguments=None, timeout=30.0):
         a = dict(arguments or {})
@@ -91,6 +93,10 @@ class FakeVault:
             if self.fail_marks and a["category"] == "checkpoint" \
                     and a.get("status") == "deprecated":
                 return {"ok": False, "text": "mark rejected", "data": None}
+            if self.reject_receipts and \
+                    a["category"] == "hermes-capture-receipt":
+                self.reject_receipts -= 1
+                return {"ok": False, "text": "receipt rejected", "data": None}
             try:
                 body = json.loads(a.get("body_json") or "{}")
             except Exception:
@@ -113,11 +119,21 @@ class FakeVault:
                         continue
                 hits.append({"key": key, "id": key, "status": ent["status"],
                              "body_json": json.dumps(ent["body"])})
-            return {"ok": True, "text": "", "data": {"results": hits}}
+            off = int(a.get("offset") or 0)
+            lim = a.get("limit")
+            page = hits[off:off + int(lim)] if lim is not None else hits[off:]
+            return {"ok": True, "text": "", "data": {"results": page}}
         if name == "perseus_vault_capture":
+            if self.reject_capture:
+                return {"ok": False, "text": "capture rejected", "data": None}
             self.captured.append(a["text"])
             return {"ok": True, "text": "", "data": {"captured": 1}}
         return {"ok": True, "text": "", "data": None}
+
+    def force_status(self, category, key, status):
+        ent = self.store.get((category, key))
+        if ent:
+            ent["status"] = status
 
     def status_of(self, category, key):
         ent = self.store.get((category, key))
@@ -488,6 +504,163 @@ def main():
         finally:
             mod.MCPClient = orig_mcp
     check("F full 8-step post-restart recovery (real initialize path)", f)
+
+    # ---- G (R3): >20 checkpoints fully paginated; pending resume across
+    #      session-ends; every item captured EXACTLY once ----
+    def g():
+        vault = FakeVault()
+        p = make_provider(mod, session_label="gw-G")
+        p._client = vault
+        keys = []
+        for i in range(25):
+            out = p.on_pre_compress([
+                {"role": "user", "content": "item %d" % i},
+                {"role": "assistant",
+                 "content": "HECHO-%02d %s" % (i, "x" * 400)}])
+            keys.append(out.split(": ", 1)[1])
+        assert len(set(keys)) == 25
+        assert len(p._draft_checkpoints()) == 25, \
+            "no silent truncation at 20 (R3)"
+        st = None
+        for _round in range(10):
+            pr = make_provider(mod, session_label="gw-G")
+            pr._client = vault
+            pr.on_session_end([])
+            st = [vault.status_of("checkpoint", k) for k in keys]
+            if all(s == "deprecated" for s in st):
+                break
+        assert st and all(s == "deprecated" for s in st), \
+            "pending checkpoints must all be recovered, none lost"
+        allcaps = "\n".join(vault.captured)
+        for i in range(25):
+            assert allcaps.count("HECHO-%02d" % i) == 1, \
+                "each checkpoint distilled exactly once"
+        # receipts pagination >100 (no silent 100-window)
+        for i in range(120):
+            vault.store[("hermes-capture-receipt", "rx-%d" % i)] = {
+                "status": "active",
+                "body": {"consumed_checkpoint": "ckpt-nonexistent-%d" % i},
+                "args": {"external_refs": [{"ref_type": "hermes_session",
+                                            "ref_value": "gw-G"}]}}
+        pn = make_provider(mod, session_label="gw-G")
+        pn._client = vault
+        assert len(pn._consumed_checkpoint_keys()) == 145, \
+            "receipt lookups must paginate beyond 100 (R3)"
+    check("G full pagination: 25 drafts + 120 receipts, each distilled once", g)
+
+    # ---- H (R1): capture truncation consumes ONLY processed items ----
+    def h():
+        vault = FakeVault()
+        p = make_provider(mod, session_label="gw-H")
+        p._client = vault
+        keys = []
+        # each evidence ~2030 chars (1000/msg cap) -> chunk ~2070:
+        # only ~3 fit under the 8000-char capture budget
+        for i in range(6):
+            out = p.on_pre_compress([
+                {"role": "user", "content": "usr-%d %s" % (i, "u" * 990)},
+                {"role": "assistant",
+                 "content": "HECHO-H%d %s" % (i, "Z" * 990)}])
+            keys.append(out.split(": ", 1)[1])
+        p2 = make_provider(mod, session_label="gw-H")
+        p2._client = vault
+        p2.on_session_end([])
+        st = [vault.status_of("checkpoint", k) for k in keys]
+        done = [k for k, s in zip(keys, st) if s == "deprecated"]
+        pend = [k for k, s in zip(keys, st) if s == "draft"]
+        assert 0 < len(done) < 6 and len(pend) == 6 - len(done), \
+            "partial capture: some processed, rest MUST remain draft"
+        rec = {json.loads(a["body_json"])["consumed_checkpoint"]
+               for (n, a) in vault.calls
+               if n == "perseus_vault_remember"
+               and a.get("category") == "hermes-capture-receipt"}
+        assert rec == set(done), \
+            "receipts only for checkpoints actually in the persisted capture"
+    check("H partial capture consumes ONLY processed checkpoints", h)
+
+    # ---- I (R2): receipt write rejected (explicit, then partial) ----
+    def i_():
+        vault = FakeVault()
+        p = make_provider(mod, session_label="gw-I")
+        p._client = vault
+        k1 = p.on_pre_compress([
+            {"role": "user", "content": "a1"},
+            {"role": "assistant", "content": "ALPHA-1 uno"}]
+        ).split(": ", 1)[1]
+        k2 = p.on_pre_compress([
+            {"role": "user", "content": "a2"},
+            {"role": "assistant", "content": "ALPHA-2 dos"}]
+        ).split(": ", 1)[1]
+        vault.reject_receipts = 1  # first receipt REJECTED, second accepted
+        p2 = make_provider(mod, session_label="gw-I")
+        p2._client = vault
+        p2.on_session_end([])
+        assert vault.status_of("checkpoint", k1) == "draft", \
+            "rejected receipt -> NOT consumed (stays available)"
+        assert vault.status_of("checkpoint", k2) == "deprecated", \
+            "confirmed receipt -> consumed (partial success handled per item)"
+        # replay: k1 re-distilled (bounded duplicate), now accepted
+        p3 = make_provider(mod, session_label="gw-I")
+        p3._client = vault
+        p3.on_session_end([])
+        assert vault.status_of("checkpoint", k1) == "deprecated"
+        assert vault.count("perseus_vault_capture") == 2, \
+            "only the unconfirmed item is re-distilled"
+    check("I receipt rejection explicit + partial receipt failure per-item", i_)
+
+    # ---- J: capture failure consumes NOTHING ----
+    def j():
+        vault = FakeVault()
+        p = make_provider(mod, session_label="gw-J")
+        p._client = vault
+        k = p.on_pre_compress([
+            {"role": "user", "content": "pendiente J"},
+            {"role": "assistant", "content": "HECHO-J uno"}]).split(": ", 1)[1]
+        vault.reject_capture = True
+        p._turn_buffer.append({"user": "buffer", "assistant": "tambien"})
+        p.on_session_end([])
+        assert vault.status_of("checkpoint", k) == "draft"
+        assert not vault.captured
+        assert not any(n == "perseus_vault_remember"
+                       and (a.get("category") == "hermes-capture-receipt"
+                            or a.get("status") == "deprecated")
+                       for (n, a) in vault.calls), \
+            "failed capture: no receipts, no consumption marking"
+        # a later attempt succeeds and completes the flow
+        vault.reject_capture = False
+        p2 = make_provider(mod, session_label="gw-J")
+        p2._client = vault
+        p2.on_session_end([])
+        assert vault.status_of("checkpoint", k) == "deprecated"
+    check("J capture failure consumes nothing; later attempt completes", j)
+
+    # ---- K (concurrency contract): host serializes session-end per
+    #      session; worst admissible overlap = a second lifecycle that
+    #      crashed BEFORE marking must NOT re-distill. True simultaneous
+    #      threads are the host's contract (documented), not testable
+    #      at provider level; this pins the guard that contract relies on. ----
+    def k():
+        vault = FakeVault()
+        p1 = make_provider(mod, session_label="gw-K")
+        p1._client = vault
+        k1 = p1.on_pre_compress([
+            {"role": "user", "content": "kv"},
+            {"role": "assistant", "content": "HECHO-K durable"}]
+        ).split(": ", 1)[1]
+        p1._turn_buffer.append({"user": "u", "assistant": "a"})
+        p1.on_session_end([])
+        assert vault.status_of("checkpoint", k1) == "deprecated"
+        # simulate a second, overlapping session-end whose process died
+        # BEFORE marking: status back to draft, receipt intact
+        vault.force_status("checkpoint", k1, "draft")
+        p2 = make_provider(mod, session_label="gw-K")
+        p2._client = vault
+        p2.on_session_end([])
+        assert vault.count("perseus_vault_capture") == 1, \
+            "overlap after confirmed persistence must never re-distill"
+        assert vault.status_of("checkpoint", k1) == "deprecated", \
+            "and must complete the marking"
+    check("K host-serialization contract guard (no re-distill on overlap)", k)
 
     width = max(len(n) for n, _, _ in results)
     failed = 0

@@ -2058,23 +2058,48 @@ class PerseusVaultProvider(MemoryProvider):
         self._checkpoint_keys.add(key)
         return f"checkpoint: {key}"
 
+    _RECALL_PAGE = 50
+    _RECALL_MAX_ITEMS = 1000
+
+    def _recall_pages(self, args_base: dict) -> List[Any]:
+        """Paginate a recall until a SHORT page (no silent truncation).
+        Defensive safety cap _RECALL_MAX_ITEMS; hitting it is logged,
+        never silent (R3: an older pending item must not silently
+        disappear and get re-distilled later)."""
+        hits: List[Any] = []
+        offset = 0
+        while offset < self._RECALL_MAX_ITEMS:
+            a = dict(args_base)
+            a["limit"] = self._RECALL_PAGE
+            a["offset"] = offset
+            try:
+                res = self._client.call_tool("perseus_vault_recall", a,
+                                             timeout=10)
+            except Exception:
+                break
+            if not res.get("ok"):
+                break
+            batch = self._recall_hits(res)
+            hits.extend(batch)
+            if len(batch) < self._RECALL_PAGE:
+                break
+            offset += self._RECALL_PAGE
+        else:
+            logger.warning(
+                "perseus-vault: recall pagination hit safety cap %d (%s)",
+                self._RECALL_MAX_ITEMS, args_base.get("category"))
+        return hits
+
     def _draft_checkpoints(self) -> List[Any]:
-        """Unconsumed (status=draft) checkpoints for THIS session scope."""
+        """Unconsumed (status=draft) checkpoints for THIS session scope
+        (fully paginated)."""
         if not self._session_label:
             return []
-        try:
-            res = self._client.call_tool(
-                "perseus_vault_recall",
+        out: List[Any] = []
+        for h in self._recall_pages(
                 {"query": "", "category": self._CHECKPOINT_CATEGORY,
                  "ref_type": "hermes_session",
-                 "ref_value": self._session_label, "limit": 20},
-                timeout=10)
-        except Exception:
-            return []
-        if not res.get("ok"):
-            return []
-        out: List[Any] = []
-        for h in self._recall_hits(res):
+                 "ref_value": self._session_label}):
             if not isinstance(h, dict) or h.get("status") != "draft":
                 continue
             body = h.get("body_json")
@@ -2106,17 +2131,12 @@ class PerseusVaultProvider(MemoryProvider):
         which is why a transcript-keyed receipt was the wrong identity."""
         if not self._session_label:
             return set()
+        out = set()
         try:
-            res = self._client.call_tool(
-                "perseus_vault_recall",
-                {"query": "", "category": self._RECEIPT_CATEGORY,
-                 "ref_type": "hermes_session",
-                 "ref_value": self._session_label, "limit": 100},
-                timeout=10)
-            if not res.get("ok"):
-                return set()
-            out = set()
-            for h in self._recall_hits(res):
+            for h in self._recall_pages(
+                    {"query": "", "category": self._RECEIPT_CATEGORY,
+                     "ref_type": "hermes_session",
+                     "ref_value": self._session_label}):
                 if not isinstance(h, dict):
                     continue
                 body = h.get("body_json")
@@ -2127,17 +2147,24 @@ class PerseusVaultProvider(MemoryProvider):
                         continue
                 if isinstance(body, dict) and body.get("consumed_checkpoint"):
                     out.add(str(body["consumed_checkpoint"]))
-            return out
         except Exception:
             return set()
+        return out
 
-    def _write_consume_receipts(self, fresh: List[Any]) -> None:
-        """Called ONLY after the capture call persisted successfully."""
-        for key, _ in fresh:
+    def _write_consume_receipts(self, processed: List[Any]) -> List[Any]:
+        """Called ONLY after the capture call persisted successfully.
+
+        Returns ONLY the items whose receipt write was CONFIRMED by the
+        server (res.ok) — a call that raised no exception is NOT
+        confirmed persistence. A rejected/failed receipt is recoverable:
+        that checkpoint stays draft and a later replay re-distills it
+        (bounded duplicate) instead of risking silent loss."""
+        confirmed: List[Any] = []
+        for key, body in processed:
             if not key:
                 continue
             try:
-                self._client.call_tool(
+                res = self._client.call_tool(
                     "perseus_vault_remember",
                     {"category": self._RECEIPT_CATEGORY,
                      "key": "consume-%s-%s" % (
@@ -2156,6 +2183,14 @@ class PerseusVaultProvider(MemoryProvider):
                 logger.warning(
                     "perseus-vault: consume-receipt write failed (%s): %s",
                     key, e)
+                continue
+            if not res.get("ok"):
+                logger.warning(
+                    "perseus-vault: consume-receipt REJECTED (%s): %s",
+                    key, (res.get("text", "") or "")[:200])
+                continue
+            confirmed.append((key, body))
+        return confirmed
 
     def _mark_checkpoints_consumed(self, checkpoints: List[Any]) -> None:
         """Called ONLY after the final distillation persisted (safe
@@ -2172,6 +2207,12 @@ class PerseusVaultProvider(MemoryProvider):
                      "type": "reference", "status": "deprecated",
                      "importance": 0.3,
                      "tags": ["checkpoint", "hermes", "consumed"],
+                     # remember() REPLACES the entity: the session ref
+                     # must be re-stated or the marked checkpoint becomes
+                     # invisible to session-scoped recovery paths (R4).
+                     "external_refs": [{"ref_type": "hermes_session",
+                                        "ref_value": self._session_label,
+                                        "relationship": "mentions"}],
                      "agent_id": self._agent_label},
                     timeout=10)
             except Exception as e:
@@ -2202,13 +2243,22 @@ class PerseusVaultProvider(MemoryProvider):
             if t["assistant"]:
                 entries.append(("ASSISTANT", t["assistant"]))
         text_parts: List[str] = []
+        processed: List[Any] = []   # EXACTLY what enters this capture (R1)
         total = 0
         for ck_key, ck_body in fresh:
             chunk = f"[checkpoint {ck_key[:24]}] {ck_body['evidence']}"
             if total + len(chunk) > _SESSION_CAPTURE_MAX_CHARS:
-                break
+                if total:
+                    # Stop here: the REMAINDER stays draft and is
+                    # recovered by a later session-end (partial capture
+                    # resumes, nothing is silently consumed).
+                    break
+                # Oversized single item: include it truncated (its full
+                # body remains durable in the Vault entity itself).
+                chunk = chunk[:_SESSION_CAPTURE_MAX_CHARS]
             text_parts.append(chunk)
             total += len(chunk)
+            processed.append((ck_key, ck_body))
         for role, content in entries:
             if not isinstance(content, str) or not content.strip():
                 continue
@@ -2218,11 +2268,11 @@ class PerseusVaultProvider(MemoryProvider):
             text_parts.append(chunk)
             total += len(chunk)
         if not text_parts:
-            # All checkpoint evidence is already distilled (consume-receipts
-            # present): do NOT re-distill, but still (idempotently) retry
-            # completing the consumption marking.
-            if checkpoints:
-                self._mark_checkpoints_consumed(checkpoints)
+            # Nothing new to distill. Only items whose consume-receipt
+            # was CONFIRMED earlier are safe to mark consumed; any
+            # unprocessed draft stays available for a later session-end.
+            self._mark_checkpoints_consumed(
+                [(k, b) for (k, b) in checkpoints if k in already])
             return
         # Session-keyed preamble: the capture distiller derives keys from
         # headlines, so a constant preamble collided across every session
@@ -2247,10 +2297,17 @@ class PerseusVaultProvider(MemoryProvider):
                 logger.warning("perseus-vault session capture rejected: %s",
                                (res.get("text", "") or "")[:200])
                 return
-            # Persistence VERIFIED -> receipts, then consumption marking.
+            # Persistence VERIFIED -> receipts for PROCESSED items only,
+            # then consumption marking for receipt-CONFIRMED items only
+            # (R1: unprocessed fresh checkpoints are never consumed;
+            # R2: unconfirmed receipts never count as persisted).
             self._captured_hashes.add(digest)
-            self._write_consume_receipts(fresh)
-        self._mark_checkpoints_consumed(checkpoints)
+            confirmed = self._write_consume_receipts(processed)
+        else:
+            confirmed = []
+        retryable = [(k, b) for (k, b) in checkpoints if k in already]
+        if confirmed or retryable:
+            self._mark_checkpoints_consumed(confirmed + retryable)
         self._turn_buffer.clear()
 
     def on_memory_write(self, action: str, target: str, content: str,

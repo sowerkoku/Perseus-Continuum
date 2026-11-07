@@ -119,15 +119,38 @@ docs, "Pre-Compress Checkpoints (fail-closed)". The provider declares
   receipt; two *simultaneous* session-ends of the same chat could both
   distill (no distributed lease exists in the 9-tool allowlist). The
   host serializes session-end per session in current deployments —
-  revisit if that ever changes.
+  revisit if that ever changes. Test K pins the guard that contract
+  relies on: an overlapping lifecycle that died before marking never
+  re-distills (receipt intact) and completes the marking.
+
+Consumption guarantees (audit R1–R4, tests G–K):
+- R1 partial capture: if assembled evidence exceeds the capture budget,
+  ONLY the checkpoints actually placed in the persisted capture get
+  consume-receipts and are marked deprecated; the remainder stays draft
+  and is resumed by a later session-end. A single oversized item is
+  included truncated (its full body stays durable in the Vault entity).
+- R2 receipt writes are verified per item (`res.ok`); a call without an
+  exception is NOT confirmed persistence. A rejected/failed receipt
+  leaves that checkpoint draft — the next replay re-distills it (a
+  bounded duplicate) rather than silently losing it. Marking applies
+  only to receipt-CONFIRMED items plus retries of confirmed ones.
+- R3 all scope recalls are paginated (page 50, logged safety cap 1000,
+  never silent): >20 drafts and >100 receipts recover completely; no
+  older pending item disappears to be re-distilled later.
+- R4 the deprecated-marking write RE-STATES the session external_ref:
+  remember() replaces the entity, and a marked checkpoint without the
+  ref would be invisible to session-scoped recovery paths.
 
 ### 4. SessionStop — `on_session_end(messages)`
 
 The **only memory-distilling path**. Safe-consumption order:
 
 ```
-read draft checkpoints ─▶ use as evidence ─▶ distill (capture ≤5)
-  ─▶ VERIFY persistence ─▶ only then mark checkpoints consumed
+read draft checkpoints (paginated) ─▶ use as evidence (track exactly
+    which items enter the capture)
+  ─▶ distill (capture ≤5)
+  ─▶ VERIFY persistence ─▶ per-item verified consume-receipts
+  ─▶ mark consumed ONLY receipt-confirmed items (rest stay draft)
 ```
 
 - The transcript (≤ 8k chars; turn buffer ≤ 40 **plus any unconsumed

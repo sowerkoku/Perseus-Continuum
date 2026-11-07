@@ -42,7 +42,8 @@ perseus-vault/
 │    ├── on_turn_start   ──▶ turn-1 warm (results discarded)  │
 │    ├── sync_turn       ──▶ non-blocking local buffer        │
 │    ├── on_memory_write ──▶ mirrors built-in memory writes   │
-│    └── on_session_end  ──▶ SCOPED capture (primary ctx)     │
+│    ├── on_pre_compress ──▶ DURABLE checkpoint (API v2)      │
+│    └── on_session_end  ──▶ FINAL distill + ckpt replay      │
 └───────────────────────────┬─────────────────────────────────┘
                             │ HTTP/JSON-RPC (MCP protocol)
 ┌─────────────────────────────────────────────────────────────┐
@@ -81,13 +82,54 @@ breaks the turn — failures degrade to an empty string.
 Mirrors built-in memory writes (MEMORY.md/USER.md) to the Vault under
 `hermes-memory` entities, so a hybrid setup never loses a write.
 
-### 3. SessionStop — `on_session_end(messages)`
-Runs a **scoped capture** — the session transcript (≤ 8k chars, last 40
-turns buffered) is distilled via `perseus_vault_capture(max_entities=5)`.
-This runs only for `primary` agent contexts (cron/subagent sessions are
-skipped to avoid polluting shared memory). It does **not** run a global
-`consolidate` — that is the server's nightly `maintain` cron job, and
-running it on every session end would be wasteful and race the cron.
+### 3. Pre-compress checkpoints — `on_pre_compress(messages)`
+
+Implements the **Hermes checkpoint contract (API v2)** — see the public
+docs, "Pre-Compress Checkpoints (fail-closed)". The provider declares
+`pre_compress_checkpoint_api_version = 2`:
+
+- Evidence is archived **durable, never distilled**: user/assistant
+  prose rows (host-normalized by v2; re-filtered locally as defense)
+  are stored as a Vault entity `category=checkpoint`, `status=draft`,
+  `importance=0.3`, tagged `external_refs[hermes_session]`.
+- **Identity** is content- and scope-addressed:
+  `ckpt-<sha1(gateway_session_key|profile|context)[:16]>-<sha1(evidence)[:12]>`
+  — identical text in different sessions/profiles never collides, and
+  retries or overlapping transcripts upsert (idempotent by contract).
+- **Failure semantics**: a successful return (`checkpoint: <key>`,
+  forwarded into the summarizer prompt) means the write committed; any
+  failure raises — never partial success. The fail-closed gate
+  (`compression.checkpoint_required`) stays **OFF** in this deployment;
+  the raise-on-failure behavior is in place so it can be armed later
+  without touching provider code. Arming it forces `micro_compact` off
+  and makes subagent forks load the provider — decide that separately.
+- Known limitation (contract-defined): facts that appear **only** in
+  tool output are not preserved by the checkpoint path — the v2
+  normalization excludes tool rows. The final distillation remains the
+  semantic layer.
+
+### 4. SessionStop — `on_session_end(messages)`
+
+The **only memory-distilling path**. Safe-consumption order:
+
+```
+read draft checkpoints ─▶ use as evidence ─▶ distill (capture ≤5)
+  ─▶ VERIFY persistence ─▶ only then mark checkpoints consumed
+```
+
+- The transcript (≤ 8k chars; turn buffer ≤ 40 **plus any unconsumed
+  checkpoints of the session** — this is also the post-restart recovery
+  path, since `gateway_session_key` survives restarts) is distilled via
+  `perseus_vault_capture(max_entities=5)`.
+- A content-keyed **distillation receipt** (`hermes-capture-receipt`)
+  makes a replayed session-end idempotent: if a crash happened between
+  distilling and marking, the replay skips re-distillation and only
+  completes the marking.
+- Runs only for `primary` agent contexts (cron/subagent sessions are
+  skipped to avoid polluting shared memory). It does **not** run a
+  global `consolidate` — that is the server's nightly `maintain` cron
+  job, and running it on every session end would be wasteful and race
+  the cron.
 
 ### Tool surface
 

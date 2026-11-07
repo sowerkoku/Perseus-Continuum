@@ -101,7 +101,7 @@ def get_hermes_home() -> Path:
 # ===========================================================================
 
 PLUGIN_YAML = r"""name: perseus-vault
-version: "0.2.1"
+version: "0.3.0"
 description: "Perseus Vault memory provider via MCP HTTP — persistent, cross-session knowledge with semantic search and bi-temporal queries"
 author: "Perseus Computing"
 cli_commands:
@@ -136,6 +136,14 @@ endpoint. Key properties (see integrations/hermes/README.md):
   recall (timeouts sized to the host's prefetch budget, issue #753 pattern).
 - Curated tool allowlist: only safe read + scoped write tools are exposed to
   the agent. No purge/consolidate/authority/state/admin tools.
+- Pre-compress checkpoints implement the Hermes checkpoint contract
+  (API v2): on_pre_compress() persists content-addressed evidence
+  (category=checkpoint, status=draft) and returns 'checkpoint: <key>';
+  any failure raises. on_session_end() is the ONLY memory-distilling
+  path: it replays unconsumed checkpoints of its session as evidence,
+  distills once (receipt-keyed for idempotent recovery after a crash),
+  and marks checkpoints consumed only after the distillation persisted.
+  The operator gate compression.checkpoint_required stays OFF here.
 - Config resolution order: env vars (canonical PERSEUS_VAULT_*, legacy
   MCP_PERSEUS_VAULT_API_KEY / MCP_HOST_PORT) -> config.yaml
   memory.perseus-vault: -> $HERMES_HOME/perseus-vault.json -> defaults.
@@ -1675,6 +1683,12 @@ class PerseusVaultProvider(MemoryProvider):
     """Perseus Vault memory provider via MCP HTTP with lifecycle hooks."""
 
     name = "perseus-vault"
+    # Hermes checkpoint contract (API v2, docs: developer-guide/
+    # memory-provider-plugin#pre-compress-checkpoints-fail-closed):
+    # a successful on_pre_compress() return == durable checkpoint committed;
+    # any failure must raise. Enforcement stays operator-gated
+    # (compression.checkpoint_required, default off in this deployment).
+    pre_compress_checkpoint_api_version = 2
 
     # Redaction applied to every capture payload BEFORE it reaches the
     # shared vault: session transcripts may contain credentials and LAN
@@ -1719,7 +1733,9 @@ class PerseusVaultProvider(MemoryProvider):
         self._prefetch_lock = threading.Lock()
         self._turn_buffer: List[Dict[str, str]] = []
         self._captured_hashes: set = set()
-        self._pre_compress_ran: bool = False
+        self._session_label: str = ""
+        self._resumed: bool = False
+        self._checkpoint_keys: set = set()
         self._config: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
@@ -1787,6 +1803,16 @@ class PerseusVaultProvider(MemoryProvider):
         self._agent_label = (kwargs.get("agent_id")
                              or os.environ.get("HERMES_PROFILE")
                              or "default")
+        # Stable identity for checkpoint scoping: gateway_session_key
+        # survives process restarts for the same chat (session_id does
+        # not), which is what makes post-restart replay possible.
+        self._session_label = str(kwargs.get("gateway_session_key")
+                                  or session_id or "")
+        self._resumed = bool(kwargs.get("resumed", False))
+        if self._resumed:
+            logger.info("perseus-vault: resumed session; draft checkpoints "
+                        "left unconsumed by a previous process will be "
+                        "replayed into this session's final distillation")
         self._load_config()
         if not self._config.get("api_key"):
             logger.warning(
@@ -1942,35 +1968,198 @@ class PerseusVaultProvider(MemoryProvider):
         if len(self._turn_buffer) > _TURN_BUFFER_CAP:
             self._turn_buffer = self._turn_buffer[-_TURN_BUFFER_CAP:]
 
+    # ------------------------------------------------------------------
+    # Pre-compress checkpoints (Hermes checkpoint API v2)
+    # ------------------------------------------------------------------
+
+    _CHECKPOINT_CATEGORY = "checkpoint"
+    _RECEIPT_CATEGORY = "hermes-capture-receipt"
+
+    def _scope_key(self) -> str:
+        """Capture-scope fingerprint: session identity + profile + context.
+
+        Two different sessions holding identical text never collide, and
+        per-profile / subagent scopes stay separated in the Vault."""
+        raw = "%s|%s|%s" % (self._session_label, self._agent_label,
+                            self._agent_context)
+        return hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _evidence_rows(messages: List[Dict[str, Any]]) -> List[Any]:
+        """user/assistant prose rows only.
+
+        Mirrors the host-side API v2 normalization as defense-in-depth:
+        tool result rows, system rows, empty or tool_calls-only assistant
+        rows and prior _compressed_summary rows are dropped.
+        KNOWN LIMITATION (documented deliberately): facts that appear
+        ONLY inside tool output are not preserved by the checkpoint path;
+        the host normalizes evidence this way by contract, and re-adding
+        tool output would re-introduce the noise the last quarantine
+        cleanup removed. The final distillation stays the semantic layer.
+        """
+        rows: List[Any] = []
+        for m in messages or []:
+            role = str(m.get("role", "")).lower()
+            if role not in ("user", "assistant"):
+                continue
+            content = m.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if m.get("_compressed_summary") or \
+                    content.lstrip().startswith("[compressed summary"):
+                continue
+            rows.append((role.upper(), content.strip()))
+        return rows
+
+    def on_pre_compress(self, messages: List[Dict[str, Any]], *,
+                       require_checkpoint: bool = False) -> str:
+        """Durable pre-compress checkpoint (contract API v2).
+
+        Success == the checkpoint is durably committed. ANY failure
+        raises — never partial success — so the operator can arm
+        compression.checkpoint_required without touching this code.
+        Idempotent by contract: the entity key is a content+scope
+        digest and remember upserts by (category, key), so retries and
+        overlapping transcripts deduplicate instead of accumulating."""
+        if not self._enabled or not self._client:
+            raise RuntimeError(
+                "perseus-vault: client offline, cannot checkpoint")
+        rows = self._evidence_rows(messages)
+        if not rows:
+            raise RuntimeError(
+                "perseus-vault: no user/assistant evidence to checkpoint")
+        text = self._deaccent("\n".join(
+            f"{role}: {self._redact(content[:1000])}"
+            for role, content in rows))
+        text = text[:_SESSION_CAPTURE_MAX_CHARS]
+        digest = hashlib.sha1(text.encode()).hexdigest()[:12]
+        key = f"ckpt-{self._scope_key()}-{digest}"
+        body = json.dumps({
+            "kind": "hermes-pre-compress-checkpoint",
+            "session": self._session_label,
+            "agent_context": self._agent_context,
+            "evidence": text,
+        }, ensure_ascii=False)
+        res = self._client.call_tool(
+            "perseus_vault_remember",
+            {"category": self._CHECKPOINT_CATEGORY, "key": key,
+             "body_json": body, "type": "reference", "status": "draft",
+             "importance": 0.3,
+             "tags": ["checkpoint", "hermes"],
+             "external_refs": [{"ref_type": "hermes_session",
+                                "ref_value": self._session_label,
+                                "relationship": "mentions"}],
+             "agent_id": self._agent_label},
+            timeout=15)
+        if not res.get("ok"):
+            raise RuntimeError(
+                "perseus-vault: checkpoint write rejected: %s"
+                % (res.get("text", "") or "")[:200])
+        self._checkpoint_keys.add(key)
+        return f"checkpoint: {key}"
+
+    def _draft_checkpoints(self) -> List[Any]:
+        """Unconsumed (status=draft) checkpoints for THIS session scope."""
+        if not self._session_label:
+            return []
+        try:
+            res = self._client.call_tool(
+                "perseus_vault_recall",
+                {"query": "", "category": self._CHECKPOINT_CATEGORY,
+                 "ref_type": "hermes_session",
+                 "ref_value": self._session_label, "limit": 20},
+                timeout=10)
+        except Exception:
+            return []
+        if not res.get("ok"):
+            return []
+        out: List[Any] = []
+        for h in self._recall_hits(res):
+            if not isinstance(h, dict) or h.get("status") != "draft":
+                continue
+            body = h.get("body_json")
+            if isinstance(body, str):
+                try:
+                    body = json.loads(body)
+                except Exception:
+                    continue
+            if isinstance(body, dict) and body.get("evidence"):
+                out.append((h.get("key") or h.get("id") or "", body))
+        return out
+
+    @staticmethod
+    def _recall_hits(res: dict) -> List[Any]:
+        data = res.get("data") or {}
+        if isinstance(data, list):
+            return data
+        hits = data.get("results") or data.get("entities") or []
+        return hits if isinstance(hits, list) else []
+
+    def _receipt_exists(self, receipt_key: str) -> bool:
+        """True if a previous run already completed this distillation."""
+        try:
+            res = self._client.call_tool(
+                "perseus_vault_recall",
+                {"query": "", "category": self._RECEIPT_CATEGORY,
+                 "limit": 50}, timeout=10)
+            if not res.get("ok"):
+                return False
+            return any(isinstance(h, dict) and h.get("key") == receipt_key
+                       for h in self._recall_hits(res))
+        except Exception:
+            return False
+
+    def _mark_checkpoints_consumed(self, checkpoints: List[Any]) -> None:
+        """Called ONLY after the final distillation persisted (safe
+        consumption). Failure here is non-fatal: the receipt makes a
+        later replay skip re-distillation, so idempotency holds."""
+        for key, body in checkpoints:
+            if not key:
+                continue
+            try:
+                self._client.call_tool(
+                    "perseus_vault_remember",
+                    {"category": self._CHECKPOINT_CATEGORY, "key": key,
+                     "body_json": json.dumps(body, ensure_ascii=False),
+                     "type": "reference", "status": "deprecated",
+                     "importance": 0.3,
+                     "tags": ["checkpoint", "hermes", "consumed"],
+                     "agent_id": self._agent_label},
+                    timeout=10)
+            except Exception as e:
+                logger.warning(
+                    "perseus-vault: could not consume checkpoint %s: %s",
+                    key, e)
+
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        """Scoped session capture (primary agent contexts only). No global
+        """Final distillation for the session (primary contexts only).
+
+        Safe-consumption order (review condition 2): read draft
+        checkpoints -> use them as evidence -> distill -> VERIFY
+        persistence -> only then mark checkpoints consumed. A crash
+        between distillation and marking is recovered idempotently
+        through the content-keyed distillation receipt. No global
         consolidate — that is the server cron's nightly job."""
         if not self._enabled or not self._client:
             return
         if self._agent_context != "primary":
             return  # cron/subagent sessions would pollute shared memory
-        if self._pre_compress_ran:
-            # Pre-compress already captured everything up to that point;
-            # capture ONLY the turns accumulated after it (dedupe).
-            entries = []
-            for t in self._turn_buffer:
-                if t["user"]:
-                    entries.append(("USER", t["user"]))
-                if t["assistant"]:
-                    entries.append(("ASSISTANT", t["assistant"]))
-            if not entries:
-                return
-        else:
-            source = messages if messages else [
-                {"role": "user", "content": t["user"]} for t in self._turn_buffer
-            ]
-            entries = [(str(msg.get("role", "")).upper(), msg.get("content") or "")
-                       for msg in source]
+        checkpoints = self._draft_checkpoints()
+        entries = []
+        for t in self._turn_buffer:
+            if t["user"]:
+                entries.append(("USER", t["user"]))
+            if t["assistant"]:
+                entries.append(("ASSISTANT", t["assistant"]))
         text_parts: List[str] = []
         total = 0
+        for ck_key, ck_body in checkpoints:
+            chunk = f"[checkpoint {ck_key[:24]}] {ck_body['evidence']}"
+            if total + len(chunk) > _SESSION_CAPTURE_MAX_CHARS:
+                break
+            text_parts.append(chunk)
+            total += len(chunk)
         for role, content in entries:
-            if role not in ("USER", "ASSISTANT"):
-                continue
             if not isinstance(content, str) or not content.strip():
                 continue
             chunk = f"{role}: {self._redact(content.strip())}"
@@ -1989,55 +2178,36 @@ class PerseusVaultProvider(MemoryProvider):
             "(facts, decisions, corrections, lessons only; skip chit-chat; "
             "never include secret values):\n\n" + "\n\n".join(text_parts))
         digest = hashlib.sha1(transcript.encode()).hexdigest()[:12]
-        if digest in self._captured_hashes:
-            self._turn_buffer.clear()
-            return
-        try:
-            res = self._client.call_tool(
-                "perseus_vault_capture",
-                {"text": transcript, "max_entities": 5,
-                 "agent_id": self._agent_label},
-                timeout=15)
-            if res.get("ok"):
-                self._captured_hashes.add(digest)
-                self._turn_buffer.clear()
-            else:
+        receipt_key = f"distill-{self._scope_key()}-{digest}"
+        if digest not in self._captured_hashes \
+                and not self._receipt_exists(receipt_key):
+            try:
+                res = self._client.call_tool(
+                    "perseus_vault_capture",
+                    {"text": transcript, "max_entities": 5,
+                     "agent_id": self._agent_label},
+                    timeout=15)
+            except Exception as e:
+                logger.warning("perseus-vault session capture failed: %s", e)
+                return
+            if not res.get("ok"):
                 logger.warning("perseus-vault session capture rejected: %s",
-                               res.get("text", "")[:200])
-        except Exception as e:
-            logger.warning("perseus-vault session capture failed: %s", e)
-
-    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
-        """Best-effort capture before context compression; never blocks."""
-        if not self._enabled or not self._client or not messages:
-            return ""
-        if self._agent_context != "primary":
-            return ""  # cron/subagent sessions would pollute shared memory
-        try:
-            session_text = self._deaccent("\n".join(
-                f"{m.get('role', 'unknown')}: "
-                f"{self._redact(str(m.get('content', ''))[:400])}"
-                for m in messages[-30:]))
-            digest = hashlib.sha1(session_text.encode()).hexdigest()[:12]
-            if digest in self._captured_hashes:
-                return ""
-            res = self._client.call_tool(
-                "perseus_vault_capture",
-                {"text": session_text[:_SESSION_CAPTURE_MAX_CHARS],
-                 "max_entities": 5, "agent_id": self._agent_label},
-                timeout=10)
-            if res.get("ok"):
-                self._captured_hashes.add(digest)
-                self._pre_compress_ran = True
-                # Turns up to here are captured; only post-compress turns
-                # should be re-captured at session end (dedupe).
-                self._turn_buffer.clear()
-                return "Session insights captured to Vault"
-            logger.warning("perseus-vault pre-compress capture rejected: %s",
-                           res.get("text", "")[:200])
-            return ""
-        except Exception:
-            return ""
+                               (res.get("text", "") or "")[:200])
+                return
+            self._captured_hashes.add(digest)
+            try:
+                self._client.call_tool(
+                    "perseus_vault_remember",
+                    {"category": self._RECEIPT_CATEGORY, "key": receipt_key,
+                     "body_json": json.dumps(
+                         {"kind": "distill-receipt",
+                          "session": self._session_label}),
+                         "type": "reference", "importance": 0.2},
+                    timeout=10)
+            except Exception as e:
+                logger.warning("perseus-vault: receipt write failed: %s", e)
+        self._mark_checkpoints_consumed(checkpoints)
+        self._turn_buffer.clear()
 
     def on_memory_write(self, action: str, target: str, content: str,
                         metadata: Optional[Dict] = None) -> None:

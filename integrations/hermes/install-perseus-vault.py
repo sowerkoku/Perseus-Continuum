@@ -2062,12 +2062,15 @@ class PerseusVaultProvider(MemoryProvider):
     _RECALL_MAX_ITEMS = 1000
 
     def _recall_pages(self, args_base: dict) -> List[Any]:
-        """Paginate a recall until a SHORT page (no silent truncation).
-        Defensive safety cap _RECALL_MAX_ITEMS; hitting it is logged,
-        never silent (R3: an older pending item must not silently
-        disappear and get re-distilled later)."""
+        """Paginate a recall until a SHORT page. Returns
+        (hits, complete) — complete=False whenever the enumeration did
+        NOT provably cover the whole result set (read error, rejected
+        page, or safety-cap truncation). Callers MUST treat an
+        incomplete read as UNKNOWN state, never as a valid partial
+        answer (R3)."""
         hits: List[Any] = []
         offset = 0
+        complete = True
         while offset < self._RECALL_MAX_ITEMS:
             a = dict(args_base)
             a["limit"] = self._RECALL_PAGE
@@ -2076,8 +2079,10 @@ class PerseusVaultProvider(MemoryProvider):
                 res = self._client.call_tool("perseus_vault_recall", a,
                                              timeout=10)
             except Exception:
+                complete = False
                 break
             if not res.get("ok"):
+                complete = False
                 break
             batch = self._recall_hits(res)
             hits.extend(batch)
@@ -2085,10 +2090,11 @@ class PerseusVaultProvider(MemoryProvider):
                 break
             offset += self._RECALL_PAGE
         else:
+            complete = False
             logger.warning(
                 "perseus-vault: recall pagination hit safety cap %d (%s)",
                 self._RECALL_MAX_ITEMS, args_base.get("category"))
-        return hits
+        return hits, complete
 
     def _draft_checkpoints(self) -> List[Any]:
         """Unconsumed (status=draft) checkpoints for THIS session scope
@@ -2096,10 +2102,18 @@ class PerseusVaultProvider(MemoryProvider):
         if not self._session_label:
             return []
         out: List[Any] = []
-        for h in self._recall_pages(
-                {"query": "", "category": self._CHECKPOINT_CATEGORY,
-                 "ref_type": "hermes_session",
-                 "ref_value": self._session_label}):
+        raw, complete = self._recall_pages(
+            {"query": "", "category": self._CHECKPOINT_CATEGORY,
+             "ref_type": "hermes_session",
+             "ref_value": self._session_label})
+        if not complete:
+            # Drafts beyond the failure point are simply not seen this
+            # cycle: they stay draft and are recovered by a later
+            # session-end — a missed draft can only DELAY, never lose.
+            logger.warning(
+                "perseus-vault: draft-checkpoint listing INCOMPLETE; "
+                "unseen drafts remain queued for a later cycle")
+        for h in raw:
             if not isinstance(h, dict) or h.get("status") != "draft":
                 continue
             body = h.get("body_json")
@@ -2128,15 +2142,22 @@ class PerseusVaultProvider(MemoryProvider):
         never marked (crash between capture and marking). Keyed per
         checkpoint, so replay is item-level idempotent — a post-restart
         transcript can never reproduce the pre-crash transcript digest,
-        which is why a transcript-keyed receipt was the wrong identity."""
+        which is why a transcript-keyed receipt was the wrong identity.
+
+        Returns (keys, complete): complete=False when the receipt set
+        is UNKNOWN beyond a failure point. An incomplete receipt
+        lookup must never decide what is safe to distill — items whose
+        receipts sit on the unread pages would be re-distilled. Callers
+        must fail the cycle closed instead of proceeding."""
         if not self._session_label:
-            return set()
+            return set(), True
         out = set()
         try:
-            for h in self._recall_pages(
-                    {"query": "", "category": self._RECEIPT_CATEGORY,
-                     "ref_type": "hermes_session",
-                     "ref_value": self._session_label}):
+            raw, complete = self._recall_pages(
+                {"query": "", "category": self._RECEIPT_CATEGORY,
+                 "ref_type": "hermes_session",
+                 "ref_value": self._session_label})
+            for h in raw:
                 if not isinstance(h, dict):
                     continue
                 body = h.get("body_json")
@@ -2148,8 +2169,8 @@ class PerseusVaultProvider(MemoryProvider):
                 if isinstance(body, dict) and body.get("consumed_checkpoint"):
                     out.add(str(body["consumed_checkpoint"]))
         except Exception:
-            return set()
-        return out
+            return out, False
+        return out, complete
 
     def _write_consume_receipts(self, processed: List[Any]) -> List[Any]:
         """Called ONLY after the capture call persisted successfully.
@@ -2234,7 +2255,19 @@ class PerseusVaultProvider(MemoryProvider):
         if self._agent_context != "primary":
             return  # cron/subagent sessions would pollute shared memory
         checkpoints = self._draft_checkpoints()
-        already = self._consumed_checkpoint_keys()
+        already, receipts_complete = self._consumed_checkpoint_keys()
+        if not receipts_complete:
+            # R3 fail-closed: the consume-receipt set could not be read
+            # completely, so "what is already distilled" is UNKNOWN.
+            # Distilling now could silently re-distill items whose
+            # receipts sit on the unread pages. Aborting loses nothing:
+            # checkpoints stay draft, the turn buffer is NOT cleared,
+            # and the next session-end retries the whole cycle.
+            logger.warning(
+                "perseus-vault: consume-receipt lookup INCOMPLETE — "
+                "aborting consumption cycle (no distill, no consume); "
+                "state preserved for a later retry")
+            return
         fresh = [(k, b) for (k, b) in checkpoints if k and k not in already]
         entries = []
         for t in self._turn_buffer:

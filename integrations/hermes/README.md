@@ -136,10 +136,22 @@ Consumption guarantees (audit R1–R4, tests G–K):
   only to receipt-CONFIRMED items plus retries of confirmed ones.
 - R3 all scope recalls are paginated (page 50, logged safety cap 1000,
   never silent): >20 drafts and >100 receipts recover completely; no
-  older pending item disappears to be re-distilled later.
+  older pending item disappears to be re-distilled later. Pagination
+  returns (hits, complete): a read error, rejected page, or cap
+  truncation sets complete=False. An INCOMPLETE consume-receipt read
+  fails the whole consumption cycle closed — no distillation, no
+  consumption, buffer and drafts untouched; the next session-end
+  retries (test L: partial read aborts; clean retry completes the
+  marking with ZERO re-distillation). An incomplete DRAFT listing is
+  safe to proceed with (a missed draft can only delay, never lose)
+  and is logged.
 - R4 the deprecated-marking write RE-STATES the session external_ref:
   remember() replaces the entity, and a marked checkpoint without the
   ref would be invisible to session-scoped recovery paths.
+  Contract verified empirically against the live Vault (2026-11-07,
+  probe entity created → refs written → rewritten WITHOUT refs →
+  get_entity showed the refs GONE → probe erased): remember() does
+  full replacement, re-declaring refs is required, not defensive.
 
 ### 4. SessionStop — `on_session_end(messages)`
 

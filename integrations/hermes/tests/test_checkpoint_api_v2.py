@@ -84,6 +84,9 @@ class FakeVault:
         self.fail_marks = False  # reject checkpoint-consumption writes
         self.reject_receipts = 0  # reject N next receipt writes
         self.reject_capture = False
+        # fail the Nth (0-based) recall call per category
+        self.fail_recall_call_index = {}
+        self._recall_counts = {}
 
     def call_tool(self, name, arguments=None, timeout=30.0):
         a = dict(arguments or {})
@@ -105,6 +108,11 @@ class FakeVault:
                               "body": body, "args": a}
             return {"ok": True, "text": "", "data": None}
         if name == "perseus_vault_recall":
+            cat = a.get("category", "")
+            idx = self._recall_counts.get(cat, 0)
+            self._recall_counts[cat] = idx + 1
+            if self.fail_recall_call_index.get(cat) == idx:
+                return {"ok": False, "text": "read error", "data": None}
             hits = []
             for (cat, key), ent in self.store.items():
                 if cat != a.get("category"):
@@ -544,7 +552,9 @@ def main():
                                             "ref_value": "gw-G"}]}}
         pn = make_provider(mod, session_label="gw-G")
         pn._client = vault
-        assert len(pn._consumed_checkpoint_keys()) == 145, \
+        got, comp = pn._consumed_checkpoint_keys()
+        assert comp, "full pagination must report completeness"
+        assert len(got) == 145, \
             "receipt lookups must paginate beyond 100 (R3)"
     check("G full pagination: 25 drafts + 120 receipts, each distilled once", g)
 
@@ -661,6 +671,49 @@ def main():
         assert vault.status_of("checkpoint", k1) == "deprecated", \
             "and must complete the marking"
     check("K host-serialization contract guard (no re-distill on overlap)", k)
+
+    # ---- L (R3 fail-safe): a partial receipt read must NOT masquerade
+    #      as complete; the cycle aborts, nothing is distilled or
+    #      consumed, and a later clean read completes exactly-once ----
+    def l_():
+        vault = FakeVault()
+        p = make_provider(mod, session_label="gw-L")
+        p._client = vault
+        keys = []
+        for i in range(60):   # >1 page of receipts after round 1
+            out = p.on_pre_compress([
+                {"role": "user", "content": "l%d" % i},
+                {"role": "assistant", "content": "HECHO-L%02d hecho" % i}])
+            keys.append(out.split(": ", 1)[1])
+        p.on_session_end([])  # round 1: all fit, 60 receipts persisted
+        assert all(vault.status_of("checkpoint", k) == "deprecated"
+                   for k in keys)
+        # simulate: one checkpoint left draft (mark never happened) and
+        # the SECOND receipts page now fails to read (60 receipts:
+        # call 0 = pre-capture lookup in round 1, call 1 = page 1 of
+        # the replay, call 2 = page 2 -> fails)
+        pending = keys[55]
+        vault.force_status("checkpoint", pending, "draft")
+        vault.fail_recall_call_index = {"hermes-capture-receipt": 2}
+        caps_before = vault.count("perseus_vault_capture")
+        p2 = make_provider(mod, session_label="gw-L")
+        p2._client = vault
+        p2.on_session_end([])
+        assert vault.count("perseus_vault_capture") == caps_before, \
+            "incomplete receipt read must NOT distill (fail-closed)"
+        assert vault.status_of("checkpoint", pending) == "draft", \
+            "incomplete receipt read must NOT consume anything"
+        # clean read afterwards: the pending item completes exactly once
+        vault.fail_recall_call_index = {}
+        vault._recall_counts = {}
+        p3 = make_provider(mod, session_label="gw-L")
+        p3._client = vault
+        p3.on_session_end([])
+        assert vault.status_of("checkpoint", pending) == "deprecated"
+        assert vault.count("perseus_vault_capture") == caps_before, \
+            "clean retry completes the marking WITHOUT re-distilling \n" \
+            "(the intact receipt proves round-1 persistence)"
+    check("L partial receipt read fails the cycle closed, then resumes", l_)
 
     width = max(len(n) for n, _, _ in results)
     failed = 0

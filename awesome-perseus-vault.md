@@ -22,25 +22,8 @@
 
 ## Framework Integrations
 
-Perseus Vault adapters for popular AI agent frameworks:
-
-### LangGraph (LangChain)
-- [perseus_vault-langgraph](https://github.com/sowerkoku/Perseus-Continuum/tree/main/integrations/langgraph) — `PerseusVaultStore` implementing `BaseStore`
-- Drop-in persistent memory for LangGraph agents
-- `pip install -e integrations/langgraph/`
-
-### CrewAI
-- [perseus_vault-crewai](https://github.com/sowerkoku/Perseus-Continuum/tree/main/integrations/crewai) — `PerseusVaultMemoryTool` as a CrewAI agent tool
-- Agents can remember, recall, journal, and get context
-- `pip install -e integrations/crewai/`
-
-### AutoGen (AG2 / autogen-core)
-- [perseus_vault-autogen](https://github.com/sowerkoku/Perseus-Continuum/tree/main/integrations/autogen) — `PerseusVaultMemory` implementing `autogen_core.memory.Memory`
-- Context injection before each inference turn
-- `pip install -e integrations/autogen/`
-
-### Other Frameworks
-Perseus Vault is MCP-native — any framework with MCP support can use Perseus Vault directly:
+Perseus Vault is MCP-native — any framework with MCP support can use
+Perseus Vault directly:
 - [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) — via MCP stdio
 - [Google ADK](https://github.com/google/adk-python) — via MCP stdio
 - [Agno](https://github.com/agno-agi/agno) — via MCP stdio

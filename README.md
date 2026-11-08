@@ -8,9 +8,6 @@ Based on **Perseus Vault** by Perseus-Computing-LLC (_discontinued project (remo
 
 [![Build and Test](https://img.shields.io/github/actions/workflow/status/sowerkoku/Perseus-Continuum/test.yml)](https://github.com/sowerkoku/Perseus-Continuum/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/github/license/sowerkoku/Perseus-Continuum)](./LICENSE)
-[![LangGraph](https://img.shields.io/badge/integrations-LangGraph-blue)](integrations/langgraph/)
-[![CrewAI](https://img.shields.io/badge/integrations-CrewAI-orange)](integrations/crewai/)
-[![AutoGen](https://img.shields.io/badge/integrations-AutoGen-purple)](integrations/autogen/)
 [![Hermes](https://img.shields.io/badge/integrations-Hermes-gold)](integrations/hermes/)
 
 Give your agents memory that survives the session, so they stop re-deriving what they
@@ -370,20 +367,17 @@ that break these stacks in practice.
 
 ## Framework Integrations
 
-Ready-to-use adapters that make Perseus Vault the default memory backend for
-popular AI agent frameworks:
+The first-class integration targets Hermes. Any MCP-compatible client can
+connect directly — no adapter needed:
 
-| Framework | Integration | Type |
+| Host | Integration | Type |
 |---|---|---|
-| [**LangGraph**](integrations/langgraph/) | `PerseusVaultStore` | `BaseStore` implementation |
-| [**CrewAI**](integrations/crewai/) | `PerseusVaultMemoryTool` | Agent tool |
 | [**Hermes**](integrations/hermes/) | `PerseusVaultMemory` | `Memory` implementation |
 
-Each adapter:
+The integration:
 - Connects via MCP stdio subprocess (persistent session)
 - Maps the framework's memory interface to Perseus Vault tools
 - Comes with a README quickstart (5 minutes to working)
-- Has passing tests with mocked MCP transport
 
 Any MCP-compatible framework works with Perseus Vault directly. See
 [MCP client and framework integrations](docs/clients/README.md) for the full list.

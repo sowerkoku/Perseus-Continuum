@@ -1,10 +1,4 @@
-<div align="center">
-  <img src=".github/banner.png" alt="Perseus Vault — Persistent Memory. Encrypted, local-first, one portable file." width="100%">
-</div>
-
 # Perseus Vault
-
-<!-- mcp-name: io.github.Perseus-Computing-LLC/perseus-vault -->
 
 > **Persistent, encrypted memory for AI agents. One Rust binary, one file, no cloud.**
 
@@ -16,8 +10,6 @@
 [![LangGraph](https://img.shields.io/badge/integrations-LangGraph-blue)](integrations/langgraph/)
 [![CrewAI](https://img.shields.io/badge/integrations-CrewAI-orange)](integrations/crewai/)
 [![AutoGen](https://img.shields.io/badge/integrations-AutoGen-purple)](integrations/autogen/)
-
-**Published on** [Official MCP Registry](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.Perseus-Computing-LLC/perseus-vault) · [Glama](https://glama.ai/mcp/servers/Perseus-Computing-LLC/perseus-vault) · [mcpservers.org](https://mcpservers.org/servers/perseus-computing-llc/perseus-vault) · [Lulu MCPs](https://getlulu.dev/mcps/perseus-vault-formerly-mimir-mneme-persistent-memory-engine) · [Docker (GHCR)](https://github.com/Perseus-Computing-LLC/perseus-vault/pkgs/container/perseus-vault)
 
 Give your agents memory that survives the session, so they stop re-deriving what they
 already learned and stop repeating past mistakes. Hybrid recall (BM25 + dense + RRF),
@@ -32,7 +24,7 @@ not counted separately. **81.4% on LongMemEval's official-CoT harness (accepted 
 ## One-Line Install
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/install.sh | sh
+curl -sSf https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/install.sh | sh
 ```
 
 That's it. Perseus Vault is installed to `~/.local/bin/perseus-vault`. Start it:
@@ -206,7 +198,7 @@ memory_bank: acme-seo            # name → deterministic workspace hash
 memory_bank_workspace: <64-hex>  # optional explicit workspace override
 ```
 
-The [Hermes memory provider](https://github.com/Perseus-Computing-LLC/hermes-plugin-perseus-vault)
+The [Hermes memory provider](https://github.com/sowerkoku/hermes-plugin-perseus-vault)
 (`hermes plugins install Perseus-Computing-LLC/hermes-plugin-perseus-vault`)
 resolves the bank once per session and scopes every Vault read and write —
 prefetch recall, `perseus_recall` / `perseus_remember` / `perseus_forget`,
@@ -244,7 +236,7 @@ The accepted single run does not authorize Runs 2/3 or promote the preference-st
 
 ### LOCOMO (mem0's own harness)
 
-Measured on mem0's own LOCOMO harness ([our fork](https://github.com/Perseus-Computing-LLC/memory-benchmarks)), not ours — cats 1–4, 1,540q, top-200, gpt-5 answerer + judge:
+Measured on mem0's own LOCOMO harness ([our fork](https://github.com/sowerkoku/Perseus-Continuum/blob/main/benchmarks-index.html)), not ours — cats 1–4, 1,540q, top-200, gpt-5 answerer + judge:
 
 | Engine | Overall | Single | Temporal | Multi | Open-domain |
 |---|---|---|---|---|---|
@@ -252,7 +244,7 @@ Measured on mem0's own LOCOMO harness ([our fork](https://github.com/Perseus-Com
 | Mem0 Platform Starter | 82.2% | 85.0 | 82.9 | 78.0 | 67.7 |
 | Zep Cloud Flex | 33.8% | 36.9 | 6.9 | 50.0 | 49.0 |
 
-Cat-5 adversarial (446q): Perseus 63.5, Mem0 55.6, Zep 49.8. Our Mem0 measurement is 9.4pts below their published file (judge/platform drift — disclosed). [Full leaderboard →](https://github.com/Perseus-Computing-LLC/memory-benchmarks)
+Cat-5 adversarial (446q): Perseus 63.5, Mem0 55.6, Zep 49.8. Our Mem0 measurement is 9.4pts below their published file (judge/platform drift — disclosed). [Full leaderboard →]([https://github.com/sowerkoku/Perseus-Continuum/blob/main/benchmarks-index.html])
 
 ### Bi-temporal time-travel (three-axis)
 
@@ -383,7 +375,7 @@ popular AI agent frameworks:
 |---|---|---|
 | [**LangGraph**](integrations/langgraph/) | `PerseusVaultStore` | `BaseStore` implementation |
 | [**CrewAI**](integrations/crewai/) | `PerseusVaultMemoryTool` | Agent tool |
-| [**AutoGen**](integrations/autogen/) | `PerseusVaultMemory` | `Memory` implementation |
+| [**Hermes**](integrations/hermes/) | `PerseusVaultMemory` | `Memory` implementation |
 
 Each adapter:
 - Connects via MCP stdio subprocess (persistent session)
@@ -833,8 +825,6 @@ perseus-vault prepare --task "..." --legacy-context            # old dump, opt-i
 
 ## Perseus Integration
 
-Perseus Vault is the default memory backend for [Perseus](https://perseus.observer):
-
 ```yaml
 perseus_vault:
   enabled: true
@@ -860,12 +850,6 @@ Perseus Vault is built for government deployment from the ground up.
 | **Audit trail** | Immutable journal with chain-of-custody |
 | **Supply chain** | SLSA attestation in progress |
 
-**For federal buyers:** See [docs/federal-buyers.md](./docs/federal-buyers.md) for
-procurement information, compliance status, and deployment models (air-gapped,
-on-premises, classified environments).
-
-Perseus Computing LLC is a US-owned small business. Current procurement identifiers and owner-published readiness claims are maintained in the [public capability statement](https://perseus.observer/government/capability-statement.html). Those claims are dated and scoped; they do not constitute CMMC certification, an ATO, or a cATO authorization.
-NAICS: 541715, 541511, 541512.
 
 ## Privacy Policy
 
@@ -895,8 +879,8 @@ Perseus Vault is a **local-first MCP server** — it runs entirely on your machi
 - No automatic off-machine backup is performed.
 
 ### Contact
-- **Email:** privacy@perseus.observer
-- **GitHub:** [Perseus-Computing-LLC/perseus-vault](https://github.com/Perseus-Computing-LLC/perseus-vault)
+- **Email:** contacto@77d.cl
+- **GitHub:** [sowerkoku/Perseus-Continuum](https://github.com/sowerkoku/Perseus-Continuum)
 
 ## Release Verification
 
@@ -916,7 +900,7 @@ sha256sum -c perseus-vault-lite-x86_64-unknown-linux-musl.tar.gz.sha256
 
 # 2. Verify SLSA build provenance (requires gh CLI + OIDC session)
 gh attestation verify perseus-vault-lite-x86_64-unknown-linux-musl.tar.gz \
-  --repo Perseus-Computing-LLC/perseus-vault
+  --repo sowerkoku/Perseus-Continuum
 
 # 3. Confirm the binary identity
 ./perseus-vault --version

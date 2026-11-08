@@ -53,6 +53,14 @@ class FakeClient:
         self.calls = []
         self.responses = dict(responses or {})
         self.default_ok = default_ok
+        self._seq = 0
+
+    def _ok_payload(self):
+        # real server shape: durable writes return ok:true + a mem-* id
+        self._seq += 1
+        payload = {"ok": True, "action": "created",
+                   "id": "mem-fake%09d" % self._seq}
+        return {"ok": True, "text": json.dumps(payload), "data": payload}
 
     def call_tool(self, name, arguments=None, timeout=30.0):
         self.calls.append((name, dict(arguments or {})))
@@ -60,10 +68,14 @@ class FakeClient:
         if callable(spec):
             return spec(name, arguments or {})
         if isinstance(spec, list):
-            return spec.pop(0) if spec else {"ok": self.default_ok, "text": "", "data": None}
+            return (spec.pop(0) if spec
+                    else (self._ok_payload() if self.default_ok
+                          else {"ok": self.default_ok, "text": "",
+                                "data": None}))
         if spec is not None:
             return spec
-        return {"ok": self.default_ok, "text": "", "data": None}
+        return (self._ok_payload() if self.default_ok
+                else {"ok": self.default_ok, "text": "", "data": None})
 
     def names(self):
         return [c[0] for c in self.calls]
@@ -88,6 +100,15 @@ class FakeVault:
         self.fail_recall_call_index = {}
         self.raise_recall_call_index = {}
         self._recall_counts = {}
+        # --- real-server semantics fidelity (F-A/F-B/F-C) ---
+        self.server_tiers = False   # agent-attributed writes -> 'proposed'
+        self.qrn_keys = set()       # these keys -> write-quarantine (qrn id)
+        self.enforce_ws = False     # recall honors workspace_hash filter
+        self._seq = 0
+        self.qrn_ckpt_first = False   # quarantine the first checkpoint write
+        self.qrn_receipt_nth = 0      # quarantine the N next receipt writes
+        self.qrn_mark_nth = 0         # quarantine the N next marking writes
+        self._qrn_counts = {"ckpt": 0}
 
     def call_tool(self, name, arguments=None, timeout=30.0):
         a = dict(arguments or {})
@@ -105,9 +126,44 @@ class FakeVault:
                 body = json.loads(a.get("body_json") or "{}")
             except Exception:
                 body = {}
-            self.store[ck] = {"status": a.get("status", "active"),
+            def _qrn():
+                payload = {"ok": True, "action": "quarantined",
+                           "id": "qrn-%012x" % (hash(ck) & 0xFFFFFFFFFFFF)}
+                return {"ok": True, "text": json.dumps(payload),
+                        "data": payload}
+            if self.qrn_ckpt_first and a["category"] == "checkpoint" \
+                    and a.get("status") == "draft" \
+                    and not self._qrn_counts["ckpt"]:
+                self._qrn_counts["ckpt"] += 1
+                return _qrn()
+            if self.qrn_receipt_nth and \
+                    a["category"] == "hermes-capture-receipt":
+                self.qrn_receipt_nth -= 1
+                return _qrn()
+            if self.qrn_mark_nth and a["category"] == "checkpoint" \
+                    and a.get("status") == "deprecated":
+                self.qrn_mark_nth -= 1
+                return _qrn()
+            if a["key"] in self.qrn_keys:
+                # real server: ok:true + qrn-* id, entity NEVER served
+                payload = {"ok": True, "action": "quarantined",
+                           "id": "qrn-%012x" % (hash(ck) & 0xFFFFFFFFFFFF)}
+                return {"ok": True,
+                        "text": json.dumps(payload), "data": payload}
+            status = a.get("status", "active")
+            if self.server_tiers and a.get("agent_id") \
+                    and status in ("draft", "active"):
+                # live contract (2026-11-07): agent-attributed writes
+                # land in the 'proposed' lifecycle tier regardless of
+                # the requested draft/active status
+                status = "proposed"
+            self._seq += 1
+            self.store[ck] = {"status": status,
                               "body": body, "args": a}
-            return {"ok": True, "text": "", "data": None}
+            payload = {"ok": True, "action": "created",
+                       "id": "mem-%012x" % self._seq}
+            return {"ok": True,
+                    "text": json.dumps(payload), "data": payload}
         if name == "perseus_vault_recall":
             cat = a.get("category", "")
             idx = self._recall_counts.get(cat, 0)
@@ -120,6 +176,11 @@ class FakeVault:
             for (cat, key), ent in self.store.items():
                 if cat != a.get("category"):
                     continue
+                if self.enforce_ws:
+                    want = a.get("workspace_hash")
+                    if want is not None and \
+                            ent["args"].get("workspace_hash", "") != want:
+                        continue
                 rt, rv = a.get("ref_type"), a.get("ref_value")
                 if rt or rv:
                     refs = ent["args"].get("external_refs") or \
@@ -787,6 +848,173 @@ def main():
         assert vault.count("perseus_vault_capture") == 0, \
             "invalid context must not distill anything"
     check("O empty-label keeps tuple contract and fails closed", o)
+
+    # ---- P (F-A): agent-attributed checkpoints land in the real
+    #      server's 'proposed' tier; consumption must accept
+    #      {draft, proposed}, keep session isolation, and never
+    #      re-distill what receipts already confirmed. ----
+    def p_test():
+        vault = FakeVault()
+        vault.server_tiers = True
+        p = make_provider(mod, session_label="gw-P")
+        p._client = vault
+        k1 = p.on_pre_compress([
+            {"role": "user", "content": "p1"},
+            {"role": "assistant", "content": "HECHO-P1 unico-alfa"}]
+        ).split(": ", 1)[1]
+        assert vault.store[("checkpoint", k1)]["status"] == "proposed", \
+            "double must emulate the real proposed tier"
+        p2 = make_provider(mod, session_label="gw-P", session_id="s2")
+        p2._client = vault
+        p2.on_session_end([])
+        assert vault.captured and "HECHO-P1" in vault.captured[-1], \
+            "proposed-tier checkpoints must be consumed like drafts"
+        assert vault.store[("checkpoint", k1)]["status"] in \
+            ("deprecated", "proposed")  # tier may not stick; receipts do
+        caps = vault.count("perseus_vault_capture")
+        p3 = make_provider(mod, session_label="gw-P", session_id="s3")
+        p3._client = vault
+        p3.on_session_end([])
+        assert vault.count("perseus_vault_capture") == caps, \
+            "receipts gate re-distillation regardless of tier"
+    check("P proposed tier consumed; receipts gate re-distill (F-A)", p_test)
+
+    # ---- Q (F-B): read scope == write scope. With a workspace
+    #      configured every provider write/read carries it and other
+    #      workspaces' entities are never seen or modified. Without a
+    #      workspace nothing is added (backward compatibility). ----
+    def q_test():
+        vault = FakeVault()
+        vault.enforce_ws = True
+        # noise in another workspace and in the unscoped default
+        for cat, key, ws in (("checkpoint", "other-ws-ckpt", "ws-B"),
+                             ("checkpoint", "unscoped-ckpt", None),
+                             ("hermes-capture-receipt", "other-ws-rcpt",
+                              "ws-B")):
+            ent_args = {"category": cat, "key": key,
+                        "body_json": json.dumps(
+                            {"evidence": "RUIDO-WS " + key,
+                             "consumed_checkpoint": "x" if cat.endswith(
+                                 "receipt") else "RUIDO-WS " + key}),
+                        "external_refs": [{"ref_type": "hermes_session",
+                                           "ref_value": "gw-Q",
+                                           "relationship": "mentions"}]}
+            if ws is not None:
+                ent_args["workspace_hash"] = ws
+            assert vault.call_tool("perseus_vault_remember",
+                                   ent_args)["ok"]
+        p = make_provider(mod, session_label="gw-Q")
+        p._client = vault
+        p._workspace_hash = "ws-A"
+        _n0 = len(vault.calls)   # only provider-originated calls below
+        k1 = p.on_pre_compress([
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "HECHO-Q1 propio"}]
+        ).split(": ", 1)[1]
+        for (n, args) in vault.calls[_n0:]:
+            if n == "perseus_vault_remember":
+                assert args.get("workspace_hash") == "ws-A", \
+                    "every provider write must carry the workspace"
+        p2 = make_provider(mod, session_label="gw-Q", session_id="s2")
+        p2._client = vault
+        p2._workspace_hash = "ws-A"
+        p2.on_session_end([])
+        assert vault.captured and "HECHO-Q1" in vault.captured[-1]
+        assert "RUIDO-WS" not in vault.captured[-1], \
+            "foreign-workspace checkpoints must never be consumed"
+        assert vault.store[("checkpoint", "other-ws-ckpt")]["status"] \
+            == "active", "foreign workspace entities must not be touched"
+        rcpts = [a2 for (n, a2) in vault.calls
+                 if n == "perseus_vault_recall"
+                 and a2.get("category") == "checkpoint"]
+        assert rcpts and all(a2.get("workspace_hash") == "ws-A"
+                             for a2 in rcpts), "reads must be scoped too"
+        # backward compatibility: no workspace configured -> no key added
+        vault2 = FakeVault()
+        p3 = make_provider(mod, session_label="gw-Q2")
+        p3._client = vault2
+        p3.on_pre_compress([
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "HECHO-Q2"}]
+        )
+        for (n, args) in vault2.calls:
+            assert "workspace_hash" not in args, \
+                "empty workspace must stay byte-compatible"
+    check("Q read/write same workspace; isolation; empty-ws compat (F-B)",
+          q_test)
+
+    # ---- R (F-C): ok:true with a qrn-* (write-quarantine) id is NOT
+    #      durable. Checkpoint -> raise; receipt -> unconfirmed (stays
+    #      recoverable); marking -> not treated as consumed (retried),
+    #      and receipts still prevent re-distillation. ----
+    def r_test():
+        # (i) checkpoint write quarantined -> raise, nothing stored
+        vault = FakeVault()
+        vault.qrn_ckpt_first = True
+        p = make_provider(mod, session_label="gw-R1")
+        p._client = vault
+        try:
+            p.on_pre_compress([
+                {"role": "user", "content": "r1"},
+                {"role": "assistant", "content": "HECHO-R1"}])
+            raise AssertionError("qrn checkpoint must raise")
+        except RuntimeError:
+            pass
+        assert not any(c[0] == "checkpoint" for c in vault.store)
+        # (ii) first receipt quarantined -> that ck stays recoverable and
+        # is completed on the next cycle with exactly one re-distill
+        vault = FakeVault()
+        p = make_provider(mod, session_label="gw-R2")
+        p._client = vault
+        k1 = p.on_pre_compress([
+            {"role": "user", "content": "r2"},
+            {"role": "assistant", "content": "HECHO-R2 alfa"}]
+        ).split(": ", 1)[1]
+        k2 = p.on_pre_compress([
+            {"role": "user", "content": "r2b"},
+            {"role": "assistant", "content": "HECHO-R2 beta"}]
+        ).split(": ", 1)[1]
+        vault.qrn_receipt_nth = 1
+        p2 = make_provider(mod, session_label="gw-R2", session_id="s2")
+        p2._client = vault
+        p2.on_session_end([])
+        st1 = vault.store[("checkpoint", k1)]["status"]
+        st2 = vault.store[("checkpoint", k2)]["status"]
+        assert st2 == "deprecated" and st1 != "deprecated", \
+            "quarantined receipt must leave its checkpoint unconsumed"
+        vault.qrn_receipt_nth = 0
+        p3 = make_provider(mod, session_label="gw-R2", session_id="s3")
+        p3._client = vault
+        p3.on_session_end([])
+        assert vault.store[("checkpoint", k1)]["status"] == "deprecated"
+        n_r2 = sum(1 for cap in vault.captured
+                   if "HECHO-R2 alfa" in cap)
+        assert n_r2 == 2, "bounded single re-distill after qrn receipt"
+        # (iii) marking quarantined -> not consumed, no re-distillation,
+        # marking retried on the next cycle
+        vault = FakeVault()
+        p = make_provider(mod, session_label="gw-R3")
+        p._client = vault
+        k = p.on_pre_compress([
+            {"role": "user", "content": "r3"},
+            {"role": "assistant", "content": "HECHO-R3"}]
+        ).split(": ", 1)[1]
+        vault.qrn_mark_nth = 1
+        p2 = make_provider(mod, session_label="gw-R3", session_id="s2")
+        p2._client = vault
+        p2.on_session_end([])
+        caps = vault.count("perseus_vault_capture")
+        p3 = make_provider(mod, session_label="gw-R3", session_id="s3")
+        p3._client = vault
+        p3.on_session_end([])
+        assert vault.count("perseus_vault_capture") == caps, \
+            "confirmed receipt must gate re-distill despite qrn marking"
+        marks = [a2 for (n, a2) in vault.calls
+                 if n == "perseus_vault_remember"
+                 and a2.get("status") == "deprecated"]
+        assert len(marks) >= 2, "marking must be retried after qrn"
+        assert vault.store[("checkpoint", k)]["status"] == "deprecated"
+    check("R qrn ids never durable: raise/unconfirmed/retry (F-C)", r_test)
 
     # ---- M (R3 tri-state): the defensive cap yields TRUNCATED, which
     #      must be treated as failure: cycle aborts, nothing consumed.

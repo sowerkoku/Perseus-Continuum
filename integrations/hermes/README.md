@@ -113,8 +113,12 @@ docs, "Pre-Compress Checkpoints (fail-closed)". The provider declares
   gateway_session_key`, so a fork's evidence is **recovered by the
   parent session's final distillation** (the parent's replay filter is
   the session ref, not the context). If the parent never runs, drafts
-  decay (importance 0.3) and are archived by the server lifecycle —
-  subagents are never autonomous sources of definitive memory.
+  stay durable and unranked-low (importance 0.3); note (live evidence,
+  2026-11-07): the server has NO automatic TTL/archive/promotion for
+  draft/proposed rows — expires_at is unset, expire is an explicit
+  idempotent sweep, promote is manual. Unclaimed drafts persist until
+  an explicit lifecycle action; they are never autonomous sources of
+  definitive memory regardless. 
 - Concurrency — host contract, version-pinned evidence (NOT prose docs):
   in Hermes **v0.21.5+14471.ge6cf2a9** every memory-provider write
   path (per-turn `sync_all`, prefetches, and the session-boundary
@@ -141,7 +145,7 @@ docs, "Pre-Compress Checkpoints (fail-closed)". The provider declares
   The worker serialization is an implementation contract, not
   official docs — re-verify on any Hermes upgrade.
 
-Consumption guarantees (audit R1–R4, tests G–K):
+Consumption guarantees (audit R1–R4, tests G–L, M–O):
 - R1 partial capture: if assembled evidence exceeds the capture budget,
   ONLY the checkpoints actually placed in the persisted capture get
   consume-receipts and are marked deprecated; the remainder stays draft
@@ -172,6 +176,32 @@ Consumption guarantees (audit R1–R4, tests G–K):
   across consecutive full passes over an unchanged set (order is not
   guaranteed under concurrent writes — inherent to offset paging;
   cycle windows are seconds and the cycle aborts on any failed page).
+Real-server lifecycle compatibility (audit round F, 2026-11-07):
+- F-A: the real server stores AGENT-ATTRIBUTED writes (any remember
+  carrying agent_id) in the 'proposed' lifecycle tier regardless of
+  the requested draft/active status; ref-scoped recall DOES serve
+  proposed rows, and proposed rows are stable (no auto-TTL, no
+  auto-promote, no self-archive). Unconsumed checkpoints are defined
+  as status ∈ {draft, proposed}; correctness never depends on the
+  tier — consume-receipts gate re-distillation regardless (test P).
+- F-D (open, observed): with agent_id present, an explicit
+  status=deprecated marking write is ALSO re-tiered to proposed, so a
+  marked checkpoint never reaches deprecated. Correctness holds (the
+  receipt keeps it out of fresh; the marking is retried idempotently
+  each cycle), but marking does not settle. Removing agent_id from
+  writes (or a server-side exemption) would restore settling — NOT
+  changed here: outside authorized scope, decision pending.
+- F-B: every provider read AND write in the checkpoint/receipt/marking
+  path now carries workspace_hash symmetrically (_ws_args); with an
+  empty workspace no key is added — byte-identical to the previous
+  behavior (test Q).
+- F-C: ok:true is NOT durable by definition. A write is confirmed only
+  with ok:true AND a materialized 'mem-*' id; a 'qrn-*' id means the
+  server write-quarantine holds it and it is NEVER served (verified
+  live). Checkpoint qrn → raise (host treats as failure); receipt qrn
+  → unconfirmed, checkpoint stays recoverable (bounded single
+  re-distill on replay); marking qrn → not treated as consumed,
+  retried next cycle; receipts still gate re-distillation (test R).
 - R4 the deprecated-marking write RE-STATES the session external_ref:
   remember() replaces the entity. Verified empirically on the live
   Vault (2026-11-07, probes cleaned after): (a) rewrite WITHOUT refs

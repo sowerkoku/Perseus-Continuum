@@ -2049,11 +2049,13 @@ class PerseusVaultProvider(MemoryProvider):
              "external_refs": [{"ref_type": "hermes_session",
                                 "ref_value": self._session_label,
                                 "relationship": "mentions"}],
-             "agent_id": self._agent_label},
+             "agent_id": self._agent_label,
+             **self._ws_args()},   # F-B: writes scope-symmetric with reads
             timeout=15)
-        if not res.get("ok"):
+        if not self._write_confirmed(res):
             raise RuntimeError(
-                "perseus-vault: checkpoint write rejected: %s"
+                "perseus-vault: checkpoint write NOT durable (rejected, "
+                "transport error, or write-quarantined qrn id): %s"
                 % (res.get("text", "") or "")[:200])
         self._checkpoint_keys.add(key)
         return f"checkpoint: {key}"
@@ -2112,7 +2114,8 @@ class PerseusVaultProvider(MemoryProvider):
         raw, state = self._recall_pages(
             {"query": "", "category": self._CHECKPOINT_CATEGORY,
              "ref_type": "hermes_session",
-             "ref_value": self._session_label})
+             "ref_value": self._session_label,
+             **self._ws_args()})   # F-B: read scope == write scope
         if state != "complete":
             # R3 rule: an incomplete recovery (FAILED or TRUNCATED) is
             # never processed as if it were complete. on_session_end
@@ -2122,7 +2125,15 @@ class PerseusVaultProvider(MemoryProvider):
                 "perseus-vault: draft-checkpoint listing %s; "
                 "consumption cycle will be aborted", state.upper())
         for h in raw:
-            if not isinstance(h, dict) or h.get("status") != "draft":
+            # F-A (live-server evidence 2026-11-07): agent-attributed
+            # writes land in the server's 'proposed' lifecycle tier even
+            # when 'draft' was requested, and recall DOES serve them
+            # (ref-scoped, stable: no auto-expiry TTL, no auto-promote,
+            # no self-archive). Unconsumed checkpoints are therefore
+            # exactly {draft, proposed}; 'expired'/'deprecated'/active
+            # rows are not. Correctness never depends on the tier:
+            # consume-receipts gate re-distillation regardless.
+            if not isinstance(h, dict) or h.get("status") not in ("draft", "proposed"):
                 continue
             body = h.get("body_json")
             if isinstance(body, str):
@@ -2133,6 +2144,35 @@ class PerseusVaultProvider(MemoryProvider):
             if isinstance(body, dict) and body.get("evidence"):
                 out.append((h.get("key") or h.get("id") or "", body))
         return out, state
+
+    @staticmethod
+    def _write_confirmed(res: dict) -> bool:
+        """ok:true is NOT synonymous with durable persistence (F-C).
+        Durable only when: response is a dict, ok:true, no JSON-RPC /
+        isError transport failure already folded into ok, and the
+        resulting id is a materialized entity (mem-*). A 'qrn-*' id
+        means the write went to the server's write-quarantine and is
+        NEVER served (verified live: ok:true + qrn id + 'quarantined
+        writes are never served'). Missing/unparseable ids are treated
+        as unconfirmed."""
+        if not isinstance(res, dict) or not res.get("ok"):
+            return False
+        rid = None
+        data = res.get("data")
+        if isinstance(data, dict):
+            rid = data.get("id")
+        if rid is None:
+            rid = res.get("id")
+        if rid is None:
+            try:
+                parsed = json.loads(res.get("text") or "")
+                if isinstance(parsed, dict):
+                    rid = parsed.get("id")
+            except Exception:
+                pass
+        if not isinstance(rid, str) or not rid.startswith("mem-"):
+            return False
+        return True
 
     @staticmethod
     def _recall_hits(res: dict) -> List[Any]:
@@ -2166,7 +2206,8 @@ class PerseusVaultProvider(MemoryProvider):
             raw, state = self._recall_pages(
                 {"query": "", "category": self._RECEIPT_CATEGORY,
                  "ref_type": "hermes_session",
-                 "ref_value": self._session_label})
+                 "ref_value": self._session_label,
+                 **self._ws_args()})   # F-B: read scope == write scope
             for h in raw:
                 if not isinstance(h, dict):
                     continue
@@ -2208,16 +2249,21 @@ class PerseusVaultProvider(MemoryProvider):
                      "type": "reference", "importance": 0.2,
                      "external_refs": [{"ref_type": "hermes_session",
                                         "ref_value": self._session_label,
-                                        "relationship": "mentions"}]},
+                                        "relationship": "mentions"}],
+                     **self._ws_args()},   # F-B: writes scope-symmetric
                     timeout=10)
             except Exception as e:
                 logger.warning(
                     "perseus-vault: consume-receipt write failed (%s): %s",
                     key, e)
                 continue
-            if not res.get("ok"):
+            if not self._write_confirmed(res):
+                # F-C: ok:true with a qrn-* id is NOT durable. Leave the
+                # checkpoint unconsumed (recoverable): a later replay
+                # re-distills it as a bounded duplicate.
                 logger.warning(
-                    "perseus-vault: consume-receipt REJECTED (%s): %s",
+                    "perseus-vault: consume-receipt NOT confirmed "
+                    "(rejected/transport/quarantined) (%s): %s",
                     key, (res.get("text", "") or "")[:200])
                 continue
             confirmed.append((key, body))
@@ -2231,7 +2277,7 @@ class PerseusVaultProvider(MemoryProvider):
             if not key:
                 continue
             try:
-                self._client.call_tool(
+                res = self._client.call_tool(
                     "perseus_vault_remember",
                     {"category": self._CHECKPOINT_CATEGORY, "key": key,
                      "body_json": json.dumps(body, ensure_ascii=False),
@@ -2244,8 +2290,19 @@ class PerseusVaultProvider(MemoryProvider):
                      "external_refs": [{"ref_type": "hermes_session",
                                         "ref_value": self._session_label,
                                         "relationship": "mentions"}],
-                     "agent_id": self._agent_label},
+                     "agent_id": self._agent_label,
+                     **self._ws_args()},   # F-B: writes scope-symmetric
                     timeout=10)
+                if not self._write_confirmed(res):
+                    # F-C marking rule: an unconfirmed marking (rejected,
+                    # transport error, or qrn quarantine) must NOT be
+                    # treated as consumed. The receipt already protects
+                    # against re-distillation; the marking is retried by
+                    # the next cycle's confirmed-items path.
+                    logger.warning(
+                        "perseus-vault: marking NOT confirmed for %s "
+                        "(rejected/transport/quarantined): %s",
+                        key, (res.get("text", "") or "")[:200])
             except Exception as e:
                 logger.warning(
                     "perseus-vault: could not consume checkpoint %s: %s",

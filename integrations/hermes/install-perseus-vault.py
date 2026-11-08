@@ -101,7 +101,7 @@ def get_hermes_home() -> Path:
 # ===========================================================================
 
 PLUGIN_YAML = r"""name: perseus-vault
-version: "0.2.0"
+version: "0.3.0"
 description: "Perseus Vault memory provider via MCP HTTP — persistent, cross-session knowledge with semantic search and bi-temporal queries"
 author: "Perseus Computing"
 cli_commands:
@@ -136,6 +136,14 @@ endpoint. Key properties (see integrations/hermes/README.md):
   recall (timeouts sized to the host's prefetch budget, issue #753 pattern).
 - Curated tool allowlist: only safe read + scoped write tools are exposed to
   the agent. No purge/consolidate/authority/state/admin tools.
+- Pre-compress checkpoints implement the Hermes checkpoint contract
+  (API v2): on_pre_compress() persists content-addressed evidence
+  (category=checkpoint, status=draft) and returns 'checkpoint: <key>';
+  any failure raises. on_session_end() is the ONLY memory-distilling
+  path: it replays unconsumed checkpoints of its session as evidence,
+  distills once (receipt-keyed for idempotent recovery after a crash),
+  and marks checkpoints consumed only after the distillation persisted.
+  The operator gate compression.checkpoint_required stays OFF here.
 - Config resolution order: env vars (canonical PERSEUS_VAULT_*, legacy
   MCP_PERSEUS_VAULT_API_KEY / MCP_HOST_PORT) -> config.yaml
   memory.perseus-vault: -> $HERMES_HOME/perseus-vault.json -> defaults.
@@ -151,11 +159,14 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
+import time
+import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from agent.memory_provider import MemoryProvider
 
@@ -1673,16 +1684,59 @@ class PerseusVaultProvider(MemoryProvider):
     """Perseus Vault memory provider via MCP HTTP with lifecycle hooks."""
 
     name = "perseus-vault"
+    # Hermes checkpoint contract (API v2, docs: developer-guide/
+    # memory-provider-plugin#pre-compress-checkpoints-fail-closed):
+    # a successful on_pre_compress() return == durable checkpoint committed;
+    # any failure must raise. Enforcement stays operator-gated
+    # (compression.checkpoint_required, default off in this deployment).
+    pre_compress_checkpoint_api_version = 2
+
+    # Redaction applied to every capture payload BEFORE it reaches the
+    # shared vault: session transcripts may contain credentials and LAN
+    # addresses, and vault memory is readable by other clients.
+    _REDACT_RES = (
+        re.compile(r"Bearer\s+[A-Za-z0-9._~+/-]+=*"),
+        re.compile(r"(?i)\b(?:api[_-]?key|token|password|passwd|secret)\b\s*[:=]\s*\S+"),
+        re.compile(r"\b(?:sk-|ghp_|gho_|xoxb_|xoxp_|npm_)[A-Za-z0-9_\-]{10,}"),
+        re.compile(r"\b(?:192\.168|10\.\d+|172\.(?:1[6-9]|2[0-9]|3[01]))\.\d{1,3}\.\d{1,3}\b"),
+    )
+
+    @classmethod
+    def _redact(cls, text: str) -> str:
+        """Strip credentials and private-network addresses from capture text."""
+        for rx in cls._REDACT_RES[:-1]:
+            text = rx.sub("[REDACTED]", text)
+        text = cls._REDACT_RES[-1].sub("[redacted-ip]", text)
+        return text
+
+    @staticmethod
+    def _deaccent(text: str) -> str:
+        """Fold Latin accents to ASCII (diseñar -> disenar).
+
+        Mitigates the server preview_cap panic: byte-indexed truncation
+        inside a multi-byte UTF-8 char kills the request (HTTP 500) and
+        Spanish text hits it ~1/3 of the time. Only combining marks are
+        stripped, so emoji/CJK pass through untouched; ASCII fast-path
+        keeps the call free for English content."""
+        if text.isascii():
+            return text
+        return "".join(c for c in unicodedata.normalize("NFKD", text)
+                       if not unicodedata.combining(c))
 
     def __init__(self):
         self._client: Optional[MCPClient] = None
         self._session_id: str = ""
         self._agent_context: str = "primary"
+        self._agent_label: str = "default"
         self._workspace_hash: str = ""
         self._enabled: bool = False
         self._prefetched: str = ""
         self._prefetch_lock = threading.Lock()
         self._turn_buffer: List[Dict[str, str]] = []
+        self._captured_hashes: set = set()
+        self._session_label: str = ""
+        self._resumed: bool = False
+        self._checkpoint_keys: set = set()
         self._config: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
@@ -1747,6 +1801,19 @@ class PerseusVaultProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._session_id = session_id
         self._agent_context = kwargs.get("agent_context", "primary")
+        self._agent_label = (kwargs.get("agent_id")
+                             or os.environ.get("HERMES_PROFILE")
+                             or "default")
+        # Stable identity for checkpoint scoping: gateway_session_key
+        # survives process restarts for the same chat (session_id does
+        # not), which is what makes post-restart replay possible.
+        self._session_label = str(kwargs.get("gateway_session_key")
+                                  or session_id or "")
+        self._resumed = bool(kwargs.get("resumed", False))
+        if self._resumed:
+            logger.info("perseus-vault: resumed session; draft checkpoints "
+                        "left unconsumed by a previous process will be "
+                        "replayed into this session's final distillation")
         self._load_config()
         if not self._config.get("api_key"):
             logger.warning(
@@ -1902,62 +1969,560 @@ class PerseusVaultProvider(MemoryProvider):
         if len(self._turn_buffer) > _TURN_BUFFER_CAP:
             self._turn_buffer = self._turn_buffer[-_TURN_BUFFER_CAP:]
 
+    # ------------------------------------------------------------------
+    # Pre-compress checkpoints (Hermes checkpoint API v2)
+    # ------------------------------------------------------------------
+
+    _CHECKPOINT_CATEGORY = "checkpoint"
+    _RECEIPT_CATEGORY = "hermes-capture-receipt"
+
+    def _scope_key(self) -> str:
+        """Capture-scope fingerprint: session identity + profile + context.
+
+        Two different sessions holding identical text never collide, and
+        per-profile / subagent scopes stay separated in the Vault."""
+        raw = "%s|%s|%s" % (self._session_label, self._agent_label,
+                            self._agent_context)
+        return hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _evidence_rows(messages: List[Dict[str, Any]]) -> List[Any]:
+        """user/assistant prose rows only.
+
+        Mirrors the host-side API v2 normalization as defense-in-depth:
+        tool result rows, system rows, empty or tool_calls-only assistant
+        rows and prior _compressed_summary rows are dropped.
+        KNOWN LIMITATION (documented deliberately): facts that appear
+        ONLY inside tool output are not preserved by the checkpoint path;
+        the host normalizes evidence this way by contract, and re-adding
+        tool output would re-introduce the noise the last quarantine
+        cleanup removed. The final distillation stays the semantic layer.
+        """
+        rows: List[Any] = []
+        for m in messages or []:
+            role = str(m.get("role", "")).lower()
+            if role not in ("user", "assistant"):
+                continue
+            content = m.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if m.get("_compressed_summary") or \
+                    content.lstrip().startswith("[compressed summary"):
+                continue
+            rows.append((role.upper(), content.strip()))
+        return rows
+
+    def on_pre_compress(self, messages: List[Dict[str, Any]], *,
+                       require_checkpoint: bool = False) -> str:
+        """Durable pre-compress checkpoint (contract API v2).
+
+        Success == the checkpoint is durably committed. ANY failure
+        raises — never partial success — so the operator can arm
+        compression.checkpoint_required without touching this code.
+        Idempotent by contract: the entity key is a content+scope
+        digest and remember upserts by (category, key), so retries and
+        overlapping transcripts deduplicate instead of accumulating."""
+        if not self._enabled or not self._client:
+            raise RuntimeError(
+                "perseus-vault: client offline, cannot checkpoint")
+        rows = self._evidence_rows(messages)
+        if not rows:
+            raise RuntimeError(
+                "perseus-vault: no user/assistant evidence to checkpoint")
+        text = self._deaccent("\n".join(
+            f"{role}: {self._redact(content[:1000])}"
+            for role, content in rows))
+        text = text[:_SESSION_CAPTURE_MAX_CHARS]
+        digest = hashlib.sha1(text.encode()).hexdigest()[:12]
+        key = f"ckpt-{self._scope_key()}-{digest}"
+        body = json.dumps({
+            "kind": "hermes-pre-compress-checkpoint",
+            "session": self._session_label,
+            "agent_context": self._agent_context,
+            "evidence": text,
+        }, ensure_ascii=False)
+        res = self._client.call_tool(
+            "perseus_vault_remember",
+            {"category": self._CHECKPOINT_CATEGORY, "key": key,
+             "body_json": body, "type": "reference", "status": "draft",
+             "importance": 0.3,
+             "tags": ["checkpoint", "hermes"],
+             "external_refs": [{"ref_type": "hermes_session",
+                                "ref_value": self._session_label,
+                                "relationship": "mentions"}],
+             "agent_id": self._agent_label,
+             **self._ws_args()},   # F-B: writes scope-symmetric with reads
+            timeout=15)
+        if not self._write_confirmed(res):
+            raise RuntimeError(
+                "perseus-vault: checkpoint write NOT durable (rejected, "
+                "transport error, or write-quarantined qrn id): %s"
+                % (res.get("text", "") or "")[:200])
+        self._checkpoint_keys.add(key)
+        return f"checkpoint: {key}"
+
+    _RECALL_PAGE = 50
+    _RECALL_MAX_ITEMS = 1000
+    # Transient 'no_match' hardening (real-server E2E follow-up of
+    # 8bcb008): the server occasionally answers a ref-scoped listing
+    # with an empty 'no_match' diagnostic moments after a write while
+    # the identical query succeeds seconds later. Bounded, scoped
+    # re-reads only — never a global retry inside _recall_pages.
+    _NO_MATCH_RETRIES = 2          # at most two additional reads
+    _NO_MATCH_RETRY_DELAY = 1.0    # seconds between reads
+
+    def _recall_pages(self, args_base: dict) -> Tuple[List[Any], str]:
+        """Paginate a recall until a SHORT page. Returns
+        (hits, state) with state EXPLICITLY one of:
+          "complete"   — every page was retrieved (short page reached)
+          "failed"     — a page raised or was rejected (ok=False)
+          "truncated"  — the defensive _RECALL_MAX_ITEMS cap was hit
+        The cap is a PROTECTION, never a license to continue:
+        TRUNCATED is treated like a failure by callers. An incomplete
+        read is UNKNOWN state, never a valid partial answer (R3)."""
+        hits: List[Any] = []
+        offset = 0
+        state = "complete"
+        diag_reason: Optional[str] = None   # first diagnostic seen, if any
+        while offset < self._RECALL_MAX_ITEMS:
+            a = dict(args_base)
+            a["limit"] = self._RECALL_PAGE
+            a["offset"] = offset
+            try:
+                res = self._client.call_tool("perseus_vault_recall", a,
+                                             timeout=10)
+            except Exception:
+                state = "failed"
+                break
+            if not res.get("ok"):
+                state = "failed"
+                break
+            d = res.get("data")
+            if not isinstance(d, dict):
+                try:
+                    d = json.loads(res.get("text") or "{}")
+                except Exception:
+                    d = {}
+            if isinstance(d, dict):
+                diag = d.get("diagnostic")
+                if (isinstance(diag, dict)
+                        and isinstance(diag.get("reason"), str)
+                        and diag_reason is None):
+                    diag_reason = diag["reason"]
+            batch = self._recall_hits(res)
+            hits.extend(batch)
+            if len(batch) < self._RECALL_PAGE:
+                break
+            offset += self._RECALL_PAGE
+        else:
+            state = "truncated"
+            logger.warning(
+                "perseus-vault: recall pagination hit safety cap %d (%s)",
+                self._RECALL_MAX_ITEMS, args_base.get("category"))
+        # Passive only: the diagnostic the server attached to the
+        # pages it served (never used for retries inside this
+        # helper). Callers that need it read it right after their
+        # own listing (see _draft_checkpoints).
+        self._last_recall_diagnostic = diag_reason
+        return hits, state
+
+    def _draft_checkpoints(self) -> Tuple[List[Any], str]:
+        """Unconsumed (status=draft) checkpoints for THIS session scope
+        (fully paginated). Returns (items, state) on EVERY path."""
+        if not self._session_label:
+            # initialize() sets _session_label from gateway_session_key
+            # or session_id; the host always supplies one at a session
+            # boundary. A missing label therefore means INVALID context,
+            # not a legitimate empty scope: recovery coverage cannot be
+            # proven, so it is non-processable (fail-closed).
+            return [], "failed"
+        out: List[Any] = []
+        self._draft_initial_diagnostic = None
+        raw, state = self._recall_pages(self._draft_listing_scope())
+        if not raw:
+            # exact diagnostic reason reported by the server for the
+            # initial listing ('no_match', another reason, or None if
+            # absent) — real data from the response, not inferred
+            # from emptiness.
+            self._draft_initial_diagnostic = getattr(
+                self, "_last_recall_diagnostic", None)
+        if state != "complete":
+            # R3 rule: an incomplete recovery (FAILED or TRUNCATED) is
+            # never processed as if it were complete. on_session_end
+            # aborts the cycle; nothing is lost — drafts are re-read
+            # fully by the next cycle.
+            logger.warning(
+                "perseus-vault: draft-checkpoint listing %s; "
+                "consumption cycle will be aborted", state.upper())
+        out.extend(self._parse_draft_items(raw))
+        return out, state
+
+    @staticmethod
+    def _parse_draft_items(raw: List[Any]) -> List[Any]:
+        """Shared parser for draft-listing pages (used by
+        _draft_checkpoints and the bounded no_match re-read)."""
+        out: List[Any] = []
+        for h in raw:
+            # F-A (live-server evidence 2026-11-07): agent-attributed
+            # writes land in the server's 'proposed' lifecycle tier even
+            # when 'draft' was requested, and recall DOES serve them
+            # (ref-scoped, stable: no auto-expiry TTL, no auto-promote,
+            # no self-archive). Unconsumed checkpoints are therefore
+            # exactly {draft, proposed}; 'expired'/'deprecated'/active
+            # rows are not. Correctness never depends on the tier:
+            # consume-receipts gate re-distillation regardless.
+            if not isinstance(h, dict) or h.get("status") not in ("draft", "proposed"):
+                continue
+            body = h.get("body_json")
+            if isinstance(body, str):
+                try:
+                    body = json.loads(body)
+                except Exception:
+                    continue
+            if isinstance(body, dict) and body.get("evidence"):
+                out.append((h.get("key") or h.get("id") or "", body))
+        return out
+
+    def _draft_listing_scope(self) -> Dict[str, Any]:
+        return {"query": "", "category": self._CHECKPOINT_CATEGORY,
+                "ref_type": "hermes_session",
+                "ref_value": self._session_label,
+                **self._ws_args()}   # F-B: read scope == write scope
+
+    def _probe_draft_listing(self) -> Tuple[List[Any], str, bool]:
+        """ONE bounded page of the draft-checkpoint listing; used as a
+        retry attempt only, never inside _recall_pages. Returns
+        (items, state, saw_no_match). saw_no_match is True ONLY when
+        the server itself served an empty page carrying
+        diagnostic.reason == 'no_match' — its explicit 'queried and
+        found nothing' signal. Transport/parse errors and any other
+        diagnostic return saw_no_match=False so the retry band never
+        covers them. This read never mutates vault state."""
+        if not self._session_label:
+            return [], "failed", False
+        a = self._draft_listing_scope()
+        a["limit"] = self._RECALL_PAGE
+        a["offset"] = 0
+        try:
+            res = self._client.call_tool("perseus_vault_recall", a,
+                                         timeout=10)
+        except Exception:
+            return [], "failed", False
+        if not isinstance(res, dict) or not res.get("ok"):
+            return [], "failed", False
+        d = res.get("data")
+        if not isinstance(d, dict):
+            try:
+                d = json.loads(res.get("text") or "{}")
+            except Exception:
+                return [], "failed", False
+        if not isinstance(d, dict):
+            return [], "failed", False
+        batch = self._recall_hits(res)
+        if batch:
+            state = "complete" if len(batch) < self._RECALL_PAGE else "truncated"
+            return self._parse_draft_items(batch), state, False
+        diag = d.get("diagnostic")
+        saw = bool(isinstance(diag, dict)
+                   and diag.get("reason") == "no_match")
+        return [], "complete", saw
+
+    @staticmethod
+    def _write_confirmed(res: dict) -> bool:
+        """ok:true is NOT synonymous with durable persistence (F-C).
+        Durable only when: response is a dict, ok:true, no JSON-RPC /
+        isError transport failure already folded into ok, and the
+        resulting id is a materialized entity (mem-*). A 'qrn-*' id
+        means the write went to the server's write-quarantine and is
+        NEVER served (verified live: ok:true + qrn id + 'quarantined
+        writes are never served'). Missing/unparseable ids are treated
+        as unconfirmed."""
+        if not isinstance(res, dict) or not res.get("ok"):
+            return False
+        rid = None
+        data = res.get("data")
+        if isinstance(data, dict):
+            rid = data.get("id")
+        if rid is None:
+            rid = res.get("id")
+        if rid is None:
+            try:
+                parsed = json.loads(res.get("text") or "")
+                if isinstance(parsed, dict):
+                    rid = parsed.get("id")
+            except Exception:
+                pass
+        if not isinstance(rid, str) or not rid.startswith("mem-"):
+            return False
+        return True
+
+    @staticmethod
+    def _recall_hits(res: dict) -> List[Any]:
+        data = res.get("data") or {}
+        if isinstance(data, list):
+            return data
+        # 'items' is the real server's key (verified live 2026-11-08:
+        # structured content is {"items": [...], "total": N,
+        # "retrieval_profile": ...}); 'results'/'entities' kept for
+        # compatibility. Blindness to 'items' was the real cause of
+        # empty ref-scoped listings against the live server.
+        hits = (data.get("items") or data.get("results")
+                or data.get("entities") or [])
+        return hits if isinstance(hits, list) else []
+
+    def _consumed_checkpoint_keys(self) -> Tuple[Set[str], str]:
+        """Checkpoint keys whose distillation ALREADY persisted.
+
+        Consume-receipts are written only after a verified capture, so
+        a receipt means the content is durable even if the draft was
+        never marked (crash between capture and marking). Keyed per
+        checkpoint, so replay is item-level idempotent — a post-restart
+        transcript can never reproduce the pre-crash transcript digest,
+        which is why a transcript-keyed receipt was the wrong identity.
+
+        Returns (keys, state) with state "complete"/"failed"/
+        "truncated" (see _recall_pages). An incomplete receipt lookup
+        must never decide what is safe to distill — items whose
+        receipts sit on the unread pages would be re-distilled.
+        Callers must fail the cycle closed instead of proceeding."""
+        if not self._session_label:
+            # same contract as _draft_checkpoints: no session identity
+            # = unprovable scope = non-processable (see above)
+            return set(), "failed"
+        out = set()
+        try:
+            raw, state = self._recall_pages(
+                {"query": "", "category": self._RECEIPT_CATEGORY,
+                 "ref_type": "hermes_session",
+                 "ref_value": self._session_label,
+                 **self._ws_args()})   # F-B: read scope == write scope
+            for h in raw:
+                if not isinstance(h, dict):
+                    continue
+                body = h.get("body_json")
+                if isinstance(body, str):
+                    try:
+                        body = json.loads(body)
+                    except Exception:
+                        continue
+                if isinstance(body, dict) and body.get("consumed_checkpoint"):
+                    out.add(str(body["consumed_checkpoint"]))
+        except Exception:
+            return out, "failed"
+        return out, state
+
+    def _write_consume_receipts(self, processed: List[Any]) -> List[Any]:
+        """Called ONLY after the capture call persisted successfully.
+
+        Returns ONLY the items whose receipt write was CONFIRMED by the
+        server (res.ok) — a call that raised no exception is NOT
+        confirmed persistence. A rejected/failed receipt is recoverable:
+        that checkpoint stays draft and a later replay re-distills it
+        (bounded duplicate) instead of risking silent loss."""
+        confirmed: List[Any] = []
+        for key, body in processed:
+            if not key:
+                continue
+            try:
+                res = self._client.call_tool(
+                    "perseus_vault_remember",
+                    {"category": self._RECEIPT_CATEGORY,
+                     "key": "consume-%s-%s" % (
+                         self._scope_key(),
+                         hashlib.sha1(key.encode()).hexdigest()[:16]),
+                     "body_json": json.dumps(
+                         {"kind": "consume-receipt",
+                          "consumed_checkpoint": key,
+                          "session": self._session_label}),
+                     "type": "reference", "importance": 0.2,
+                     "external_refs": [{"ref_type": "hermes_session",
+                                        "ref_value": self._session_label,
+                                        "relationship": "mentions"}],
+                     **self._ws_args()},   # F-B: writes scope-symmetric
+                    timeout=10)
+            except Exception as e:
+                logger.warning(
+                    "perseus-vault: consume-receipt write failed (%s): %s",
+                    key, e)
+                continue
+            if not self._write_confirmed(res):
+                # F-C: ok:true with a qrn-* id is NOT durable. Leave the
+                # checkpoint unconsumed (recoverable): a later replay
+                # re-distills it as a bounded duplicate.
+                logger.warning(
+                    "perseus-vault: consume-receipt NOT confirmed "
+                    "(rejected/transport/quarantined) (%s): %s",
+                    key, (res.get("text", "") or "")[:200])
+                continue
+            confirmed.append((key, body))
+        return confirmed
+
+    def _mark_checkpoints_consumed(self, checkpoints: List[Any]) -> None:
+        """Called ONLY after the final distillation persisted (safe
+        consumption). Failure here is non-fatal: the receipt makes a
+        later replay skip re-distillation, so idempotency holds."""
+        for key, body in checkpoints:
+            if not key:
+                continue
+            try:
+                res = self._client.call_tool(
+                    "perseus_vault_remember",
+                    {"category": self._CHECKPOINT_CATEGORY, "key": key,
+                     "body_json": json.dumps(body, ensure_ascii=False),
+                     "type": "reference", "status": "deprecated",
+                     "importance": 0.3,
+                     "tags": ["checkpoint", "hermes", "consumed"],
+                     # remember() REPLACES the entity: the session ref
+                     # must be re-stated or the marked checkpoint becomes
+                     # invisible to session-scoped recovery paths (R4).
+                     "external_refs": [{"ref_type": "hermes_session",
+                                        "ref_value": self._session_label,
+                                        "relationship": "mentions"}],
+                     "agent_id": self._agent_label,
+                     **self._ws_args()},   # F-B: writes scope-symmetric
+                    timeout=10)
+                if not self._write_confirmed(res):
+                    # F-C marking rule: an unconfirmed marking (rejected,
+                    # transport error, or qrn quarantine) must NOT be
+                    # treated as consumed. The receipt already protects
+                    # against re-distillation; the marking is retried by
+                    # the next cycle's confirmed-items path.
+                    logger.warning(
+                        "perseus-vault: marking NOT confirmed for %s "
+                        "(rejected/transport/quarantined): %s",
+                        key, (res.get("text", "") or "")[:200])
+            except Exception as e:
+                logger.warning(
+                    "perseus-vault: could not consume checkpoint %s: %s",
+                    key, e)
+
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        """Scoped session capture (primary agent contexts only). No global
+        """Final distillation for the session (primary contexts only).
+
+        Safe-consumption order (review condition 2): read draft
+        checkpoints -> use them as evidence -> distill -> VERIFY
+        persistence -> only then mark checkpoints consumed. A crash
+        between distillation and marking is recovered idempotently
+        through the content-keyed distillation receipt. No global
         consolidate — that is the server cron's nightly job."""
         if not self._enabled or not self._client:
             return
         if self._agent_context != "primary":
             return  # cron/subagent sessions would pollute shared memory
-        source = messages if messages else [
-            {"role": "user", "content": t["user"]} for t in self._turn_buffer
-        ]
+        checkpoints, ck_state = self._draft_checkpoints()
+        already, rc_state = self._consumed_checkpoint_keys()
+        if ck_state != "complete" or rc_state != "complete":
+            # R3 fail-closed, explicit tri-state: a recovery is
+            # processed ONLY when provably COMPLETE. FAILED or
+            # TRUNCATED on either lookup aborts the cycle: no
+            # capture, no receipts, no marking, buffer untouched.
+            # Nothing is lost — the next session-end re-reads fully.
+            logger.warning(
+                "perseus-vault: recovery incomplete (checkpoints=%s, "
+                "receipts=%s) — aborting consumption cycle; state "
+                "preserved for a later retry", ck_state, rc_state)
+            return
+        # Transient 'no_match' band (authorized 2026-11-08): fires ONLY
+        # when ALL hold — the listing is empty, the server itself
+        # reported diagnostic 'no_match', ZERO receipts exist, and BOTH
+        # listings completed (FAILED/TRUNCATED aborted above; transport
+        # errors yield saw_no_match=False and never re-enter). At most
+        # two additional scoped reads, one second apart. Nothing is
+        # marked consumed by retries alone: the decision below is the
+        # same normal path; if every read stays empty the behavior is
+        # unchanged fail-closed (no capture, no receipts, no marking).
+        if (not checkpoints and not already and self._session_label
+                and ck_state == "complete" and rc_state == "complete"
+                and getattr(self, "_draft_initial_diagnostic", None)
+                == "no_match"):
+            for attempt in range(self._NO_MATCH_RETRIES):
+                # one second between reads, including before the first
+                time.sleep(self._NO_MATCH_RETRY_DELAY)
+                found, probe_state, saw_no_match = self._probe_draft_listing()
+                logger.warning(
+                    "perseus-vault: empty+no_match checkpoint listing "
+                    "with zero receipts — scoped re-read %d/%d: %d found "
+                    "(state=%s)", attempt + 1, self._NO_MATCH_RETRIES,
+                    len(found), probe_state)
+                if found:
+                    checkpoints, ck_state = found, probe_state
+                    break
+                if probe_state != "complete" or not saw_no_match:
+                    break
+        fresh = [(k, b) for (k, b) in checkpoints if k and k not in already]
+        entries = []
+        for t in self._turn_buffer:
+            if t["user"]:
+                entries.append(("USER", t["user"]))
+            if t["assistant"]:
+                entries.append(("ASSISTANT", t["assistant"]))
         text_parts: List[str] = []
+        processed: List[Any] = []   # EXACTLY what enters this capture (R1)
         total = 0
-        for msg in source:
-            role = msg.get("role", "")
-            if role not in ("user", "assistant"):
-                continue
-            content = msg.get("content") or ""
+        for ck_key, ck_body in fresh:
+            chunk = f"[checkpoint {ck_key[:24]}] {ck_body['evidence']}"
+            if total + len(chunk) > _SESSION_CAPTURE_MAX_CHARS:
+                if total:
+                    # Stop here: the REMAINDER stays draft and is
+                    # recovered by a later session-end (partial capture
+                    # resumes, nothing is silently consumed).
+                    break
+                # Oversized single item: include it truncated (its full
+                # body remains durable in the Vault entity itself).
+                chunk = chunk[:_SESSION_CAPTURE_MAX_CHARS]
+            text_parts.append(chunk)
+            total += len(chunk)
+            processed.append((ck_key, ck_body))
+        for role, content in entries:
             if not isinstance(content, str) or not content.strip():
                 continue
-            chunk = f"{role.upper()}: {content.strip()}"
+            chunk = f"{role}: {self._redact(content.strip())}"
             if total + len(chunk) > _SESSION_CAPTURE_MAX_CHARS:
                 break
             text_parts.append(chunk)
             total += len(chunk)
         if not text_parts:
+            # Nothing new to distill. Only items whose consume-receipt
+            # was CONFIRMED earlier are safe to mark consumed; any
+            # unprocessed draft stays available for a later session-end.
+            self._mark_checkpoints_consumed(
+                [(k, b) for (k, b) in checkpoints if k in already])
             return
-        transcript = (
-            "Session transcript to distill into durable memories "
+        # Session-keyed preamble: the capture distiller derives keys from
+        # headlines, so a constant preamble collided across every session
+        # (interference >=0.9 -> write-quarantine flood).
+        transcript = self._deaccent(
+            f"[session {self._session_id[:12]}] Session transcript to distill "
+            "into durable memories "
             "(facts, decisions, corrections, lessons only; skip chit-chat; "
-            "never include secret values):\n\n" + "\n\n".join(text_parts)
-        )
-        try:
-            self._client.call_tool(
-                "perseus_vault_capture",
-                {"text": transcript, "max_entities": 5},
-                timeout=60)
-            self._turn_buffer.clear()
-        except Exception as e:
-            logger.warning("perseus-vault session capture failed: %s", e)
-
-    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
-        """Best-effort capture before context compression; never blocks."""
-        if not self._enabled or not self._client or not messages:
-            return ""
-        try:
-            session_text = "\n".join(
-                f"{m.get('role', 'unknown')}: {str(m.get('content', ''))[:400]}"
-                for m in messages[-30:])
-            self._client.call_tool(
-                "perseus_vault_capture",
-                {"text": session_text[:_SESSION_CAPTURE_MAX_CHARS],
-                 "max_entities": 5},
-                timeout=30)
-            return "Session insights captured to Vault"
-        except Exception:
-            return ""
+            "never include secret values):\n\n" + "\n\n".join(text_parts))
+        digest = hashlib.sha1(transcript.encode()).hexdigest()[:12]
+        if digest not in self._captured_hashes:
+            try:
+                res = self._client.call_tool(
+                    "perseus_vault_capture",
+                    {"text": transcript, "max_entities": 5,
+                     "agent_id": self._agent_label},
+                    timeout=15)
+            except Exception as e:
+                logger.warning("perseus-vault session capture failed: %s", e)
+                return
+            if not res.get("ok"):
+                logger.warning("perseus-vault session capture rejected: %s",
+                               (res.get("text", "") or "")[:200])
+                return
+            # Persistence VERIFIED -> receipts for PROCESSED items only,
+            # then consumption marking for receipt-CONFIRMED items only
+            # (R1: unprocessed fresh checkpoints are never consumed;
+            # R2: unconfirmed receipts never count as persisted).
+            self._captured_hashes.add(digest)
+            confirmed = self._write_consume_receipts(processed)
+        else:
+            confirmed = []
+        retryable = [(k, b) for (k, b) in checkpoints if k in already]
+        if confirmed or retryable:
+            self._mark_checkpoints_consumed(confirmed + retryable)
+        self._turn_buffer.clear()
 
     def on_memory_write(self, action: str, target: str, content: str,
                         metadata: Optional[Dict] = None) -> None:
@@ -1973,7 +2538,7 @@ class PerseusVaultProvider(MemoryProvider):
                     "category": category,
                     "key": key,
                     "body_json": json.dumps({
-                        "summary": content[:600],
+                        "summary": self._deaccent(content[:600]),
                         "source": "hermes-builtin-memory",
                         "target": target,
                     }),
@@ -2009,6 +2574,30 @@ class PerseusVaultProvider(MemoryProvider):
                                         f"the perseus-vault provider"})
         try:
             call_args = dict(args or {})
+            # Accent-fold on the write path: entities this plugin stores then
+            # never carry a multi-byte char at the preview-cap byte boundary.
+            # body_json arrives as a JSON *string* (often with \uXXXX escapes),
+            # so fold inside the decoded values, not over the serialized text.
+            if tool_name == "perseus_vault_remember" and isinstance(
+                    call_args.get("body_json"), str):
+                try:
+                    def _fold(o):
+                        if isinstance(o, str):
+                            return self._deaccent(o)
+                        if isinstance(o, dict):
+                            return {k: _fold(v) for k, v in o.items()}
+                        if isinstance(o, list):
+                            return [_fold(v) for v in o]
+                        return o
+                    call_args["body_json"] = json.dumps(
+                        _fold(json.loads(call_args["body_json"])),
+                        ensure_ascii=False)
+                except ValueError:
+                    call_args["body_json"] = self._deaccent(
+                        call_args["body_json"])
+            elif tool_name == "perseus_vault_capture" and isinstance(
+                    call_args.get("text"), str):
+                call_args["text"] = self._deaccent(call_args["text"])
             if tool_name in ("perseus_vault_recall", "perseus_vault_recall_when",
                              "perseus_vault_semantic_search", "perseus_vault_context",
                              "perseus_vault_remember", "perseus_vault_forget",

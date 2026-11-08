@@ -770,6 +770,24 @@ def main():
         assert vault.status_of("checkpoint", k2) == "deprecated"
     check("N raised page = FAILED; aborts cycle, then resumes clean", n)
 
+    # ---- O (return-contract regression): an empty session label is
+    #      INVALID context (initialize() always gets session_id from the
+    #      host); every helper path must keep the tuple contract and the
+    #      cycle must fail closed — never raise ValueError on unpack. ----
+    def o():
+        vault = FakeVault()
+        p = make_provider(mod, session_label="gw-O")
+        p._client = vault
+        p._session_label = ""           # invalid context (defensive path)
+        dlist, dst = p._draft_checkpoints()      # must not raise
+        assert dlist == [] and dst == "failed"
+        keys, rstate = p._consumed_checkpoint_keys()
+        assert keys == set() and rstate == "failed"
+        p.on_session_end([])           # must return quietly, fail-closed
+        assert vault.count("perseus_vault_capture") == 0, \
+            "invalid context must not distill anything"
+    check("O empty-label keeps tuple contract and fails closed", o)
+
     # ---- M (R3 tri-state): the defensive cap yields TRUNCATED, which
     #      must be treated as failure: cycle aborts, nothing consumed.
     #      The cap is a protection, never a license to process. ----

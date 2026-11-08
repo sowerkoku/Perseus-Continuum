@@ -165,7 +165,7 @@ import unicodedata
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from agent.memory_provider import MemoryProvider
 
@@ -2061,7 +2061,7 @@ class PerseusVaultProvider(MemoryProvider):
     _RECALL_PAGE = 50
     _RECALL_MAX_ITEMS = 1000
 
-    def _recall_pages(self, args_base: dict) -> List[Any]:
+    def _recall_pages(self, args_base: dict) -> Tuple[List[Any], str]:
         """Paginate a recall until a SHORT page. Returns
         (hits, state) with state EXPLICITLY one of:
           "complete"   — every page was retrieved (short page reached)
@@ -2098,11 +2098,16 @@ class PerseusVaultProvider(MemoryProvider):
                 self._RECALL_MAX_ITEMS, args_base.get("category"))
         return hits, state
 
-    def _draft_checkpoints(self) -> List[Any]:
+    def _draft_checkpoints(self) -> Tuple[List[Any], str]:
         """Unconsumed (status=draft) checkpoints for THIS session scope
-        (fully paginated)."""
+        (fully paginated). Returns (items, state) on EVERY path."""
         if not self._session_label:
-            return []
+            # initialize() sets _session_label from gateway_session_key
+            # or session_id; the host always supplies one at a session
+            # boundary. A missing label therefore means INVALID context,
+            # not a legitimate empty scope: recovery coverage cannot be
+            # proven, so it is non-processable (fail-closed).
+            return [], "failed"
         out: List[Any] = []
         raw, state = self._recall_pages(
             {"query": "", "category": self._CHECKPOINT_CATEGORY,
@@ -2137,7 +2142,7 @@ class PerseusVaultProvider(MemoryProvider):
         hits = data.get("results") or data.get("entities") or []
         return hits if isinstance(hits, list) else []
 
-    def _consumed_checkpoint_keys(self) -> set:
+    def _consumed_checkpoint_keys(self) -> Tuple[Set[str], str]:
         """Checkpoint keys whose distillation ALREADY persisted.
 
         Consume-receipts are written only after a verified capture, so
@@ -2153,7 +2158,9 @@ class PerseusVaultProvider(MemoryProvider):
         receipts sit on the unread pages would be re-distilled.
         Callers must fail the cycle closed instead of proceeding."""
         if not self._session_label:
-            return set(), "complete"
+            # same contract as _draft_checkpoints: no session identity
+            # = unprovable scope = non-processable (see above)
+            return set(), "failed"
         out = set()
         try:
             raw, state = self._recall_pages(

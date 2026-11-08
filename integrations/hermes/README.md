@@ -130,11 +130,16 @@ docs, "Pre-Compress Checkpoints (fail-closed)". The provider declares
   Residual carve-outs (inline, end-of-life only): `run_agent.py:879`
   `shutdown_memory_provider` (idempotent, process teardown) and
   `run_agent.py:889` `commit_memory_session` (interrupt lifecycle,
-  via `tui_gateway/session_lifecycle.py:431`). The provider's own
-  receipt guard (test K) is the last line of defense there: an
-  interrupted or overlapping lifecycle never re-distills a
-  receipt-confirmed item. The guarantee is at implementation level,
-  not official docs — re-verify on any Hermes upgrade.
+  via `tui_gateway/session_lifecycle.py:431`). NO concurrent
+  exclusion is demonstrated at provider level for these two paths:
+  a consume-receipt is not an atomic mutual-exclusion primitive.
+  The receipt guard's precise guarantee (test K) covers ONLY items
+  whose receipt was confirmed BEFORE the recovery run — sequential
+  recovery after an interruption, not two concurrent executions that
+  have not yet written receipts. Mitigation for the carve-outs is
+  their end-of-life position (no active turn), not a mechanism.
+  The worker serialization is an implementation contract, not
+  official docs — re-verify on any Hermes upgrade.
 
 Consumption guarantees (audit R1–R4, tests G–K):
 - R1 partial capture: if assembled evidence exceeds the capture budget,
@@ -154,7 +159,10 @@ Consumption guarantees (audit R1–R4, tests G–K):
   Rule table: COMPLETE → process; FAILED → abort on_session_end
   (no capture, no receipts, no marking, buffer untouched);
   TRUNCATED → treated as failure too — the cap is a protection,
-  never a license to process an incomplete read. Tests L (failed
+  never a license to process an incomplete read. Every helper path
+  keeps the tuple contract: a missing session label is an INVALID
+  context (initialize() always receives session_id), returns state
+  FAILED, and fails the cycle closed (test O). Tests L (failed
   2nd receipts page aborts; clean retry completes marking with ZERO
   re-distillation) and M (lowered cap → TRUNCATED aborts; nothing
   consumed; later complete read finishes normally).

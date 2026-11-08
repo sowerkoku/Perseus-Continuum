@@ -18,7 +18,7 @@ lives in.*
 | Role | Who | Responsibility |
 |---|---|---|
 | **Security Lead** | Thomas Connally | Owns the report end-to-end: acknowledgment, triage, fix coordination, disclosure. |
-| **Backup handler** | Mark Thrailkill (mark@perseus.observer) | Covers acknowledgment and triage when the Security Lead is unavailable (OOO, >24h). |
+| **Backup handler** | Mark Thrailkill | Covers acknowledgment and triage when the Security Lead is unavailable (OOO, >24h). |
 
 At least one handler monitors the intake channels every business day. If the
 primary is unreachable within the acknowledgment window, the backup takes over.

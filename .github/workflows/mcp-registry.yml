@@ -23,9 +23,19 @@ name: Publish to MCP Registry
 on:
   pull_request:
   push:
+    # Only the protected branches need a post-merge verify here; PR events
+    # already cover feature branches. (An unfiltered push trigger made every
+    # PR-branch push fire a second full run of this workflow: two identical
+    # verify-registry checks and two skipped publish jobs per PR, 2026-11-08.)
+    branches: [main, master]
   workflow_run:
     workflows: ["Release binaries"]
     types: [completed]
+    # Release-binary runs also fire for PRs; this chain exists for the
+    # post-release publish only (see the if-gate on the publish job), so
+    # filter it to version-tag branches. Otherwise every PR got a third
+    # mcp-registry run with every job skipped.
+    branches: ["v*"]
   workflow_dispatch:
 
 permissions:

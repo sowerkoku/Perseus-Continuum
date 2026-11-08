@@ -181,8 +181,10 @@ server occasionally answers a ref-scoped listing with an empty page
 carrying diagnostic.reason='no_match' moments after a write. The
 session-end flow now performs a bounded band: at most TWO additional
 scoped reads of the checkpoint listing, one second apart, fired ONLY
-when all four hold simultaneously — listing empty, server itself
-reported 'no_match', ZERO receipts, both listings COMPLETE. Never for
+when all FIVE hold simultaneously — listing empty, the INITIAL
+listing's own response carried diagnostic.reason exactly 'no_match'
+(recorded from the real payload at listing time, never inferred from
+emptiness), ZERO receipts, both listings COMPLETE. Never for
 transport errors, FAILED or TRUNCATED; never inside _recall_pages;
 retries alone never mark anything consumed; if every read stays empty
 the behavior remains exactly fail-closed (tests S1–S7). Related root

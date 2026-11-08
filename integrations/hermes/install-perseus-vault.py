@@ -2083,6 +2083,7 @@ class PerseusVaultProvider(MemoryProvider):
         hits: List[Any] = []
         offset = 0
         state = "complete"
+        diag_reason: Optional[str] = None   # first diagnostic seen, if any
         while offset < self._RECALL_MAX_ITEMS:
             a = dict(args_base)
             a["limit"] = self._RECALL_PAGE
@@ -2096,6 +2097,18 @@ class PerseusVaultProvider(MemoryProvider):
             if not res.get("ok"):
                 state = "failed"
                 break
+            d = res.get("data")
+            if not isinstance(d, dict):
+                try:
+                    d = json.loads(res.get("text") or "{}")
+                except Exception:
+                    d = {}
+            if isinstance(d, dict):
+                diag = d.get("diagnostic")
+                if (isinstance(diag, dict)
+                        and isinstance(diag.get("reason"), str)
+                        and diag_reason is None):
+                    diag_reason = diag["reason"]
             batch = self._recall_hits(res)
             hits.extend(batch)
             if len(batch) < self._RECALL_PAGE:
@@ -2106,6 +2119,11 @@ class PerseusVaultProvider(MemoryProvider):
             logger.warning(
                 "perseus-vault: recall pagination hit safety cap %d (%s)",
                 self._RECALL_MAX_ITEMS, args_base.get("category"))
+        # Passive only: the diagnostic the server attached to the
+        # pages it served (never used for retries inside this
+        # helper). Callers that need it read it right after their
+        # own listing (see _draft_checkpoints).
+        self._last_recall_diagnostic = diag_reason
         return hits, state
 
     def _draft_checkpoints(self) -> Tuple[List[Any], str]:
@@ -2119,7 +2137,15 @@ class PerseusVaultProvider(MemoryProvider):
             # proven, so it is non-processable (fail-closed).
             return [], "failed"
         out: List[Any] = []
+        self._draft_initial_diagnostic = None
         raw, state = self._recall_pages(self._draft_listing_scope())
+        if not raw:
+            # exact diagnostic reason reported by the server for the
+            # initial listing ('no_match', another reason, or None if
+            # absent) — real data from the response, not inferred
+            # from emptiness.
+            self._draft_initial_diagnostic = getattr(
+                self, "_last_recall_diagnostic", None)
         if state != "complete":
             # R3 rule: an incomplete recovery (FAILED or TRUNCATED) is
             # never processed as if it were complete. on_session_end
@@ -2405,7 +2431,10 @@ class PerseusVaultProvider(MemoryProvider):
         # marked consumed by retries alone: the decision below is the
         # same normal path; if every read stays empty the behavior is
         # unchanged fail-closed (no capture, no receipts, no marking).
-        if not checkpoints and not already and self._session_label:
+        if (not checkpoints and not already and self._session_label
+                and ck_state == "complete" and rc_state == "complete"
+                and getattr(self, "_draft_initial_diagnostic", None)
+                == "no_match"):
             for attempt in range(self._NO_MATCH_RETRIES):
                 # one second between reads, including before the first
                 time.sleep(self._NO_MATCH_RETRY_DELAY)

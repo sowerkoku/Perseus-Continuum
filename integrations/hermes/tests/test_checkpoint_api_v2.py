@@ -103,6 +103,9 @@ class FakeVault:
         # the Nth (0-based) recall call of a category (transient
         # real-server behavior the bounded retry band must handle)
         self.no_match_recall_index = {}
+        # serve an EMPTY page with an ARBITRARY diagnostic (or none)
+        # for the Nth recall of a category: {cat: {idx: reason|None}}
+        self.empty_diag_index = {}
         self._recall_counts = {}
         # --- real-server semantics fidelity (F-A/F-B/F-C) ---
         self.server_tiers = False   # agent-attributed writes -> 'proposed'
@@ -180,6 +183,13 @@ class FakeVault:
                 payload = {"items": [], "total": 0,
                            "diagnostic": {"reason": "no_match",
                                           "hint": "no matches"}}
+                return {"ok": True, "text": json.dumps(payload),
+                        "data": payload}
+            if idx in (self.empty_diag_index.get(cat) or {}):
+                reason = self.empty_diag_index[cat][idx]
+                payload = {"items": [], "total": 0}
+                if reason is not None:
+                    payload["diagnostic"] = {"reason": reason}
                 return {"ok": True, "text": json.dumps(payload),
                         "data": payload}
             hits = []
@@ -1136,6 +1146,70 @@ def main():
         p.on_session_end([])          # further replay: still nothing
         assert vault.count("perseus_vault_capture") == 0
     check("S7 confirmed receipt: no re-distillation, band idle", s7_test)
+
+    # ---- T (band ENTRY condition uses the REAL initial diagnostic,
+    #      not an inference from emptiness). ----
+    def t1_test():
+        vault, p, k = s_mk("gw-T1")
+        vault.no_match_recall_index = {"checkpoint": [0, 1]}
+        # band must ENABLE: initial no_match; re-read 1 no_match,
+        # re-read 2 finds -> processed
+        p.on_session_end([])
+        assert vault.captured and "HECHO-gw-T1" in vault.captured[-1]
+        assert len(ck_recalls(vault)) == 3
+    check("T1 initial no_match + zero receipts: band enabled", t1_test)
+
+    def t2_test():
+        vault, p, k = s_mk("gw-T2")
+        vault.empty_diag_index = {"checkpoint": {0: "semantic_disabled"}}
+        p.on_session_end([])
+        assert len(ck_recalls(vault)) == 1, \
+            "a different diagnostic must NOT trigger even one re-read"
+        assert not vault.captured
+    check("T2 initial empty + other diagnostic: no band", t2_test)
+
+    def t3_test():
+        vault, p, k = s_mk("gw-T3")
+        vault.empty_diag_index = {"checkpoint": {0: None}}
+        p.on_session_end([])
+        assert len(ck_recalls(vault)) == 1, \
+            "a missing diagnostic must NOT trigger the band"
+        assert not vault.captured
+    check("T3 initial empty + absent diagnostic: no band", t3_test)
+
+    def t4_test():
+        vault, p, k = s_mk("gw-T4")
+        vault.raise_recall_call_index = {"checkpoint": 0}
+        p.on_session_end([])
+        assert len(ck_recalls(vault)) == 1, "aborted, no band"
+        assert not vault.captured
+    check("T4 initial transport error: aborted, no band", t4_test)
+
+    def t5_test():
+        # TRUNCATED initial listing: no band (FAILED covered by T4)
+        vault, p, k = s_mk("gw-T5")
+        for i in range(3):
+            p.on_pre_compress([
+                {"role": "user", "content": "t5-%d" % i},
+                {"role": "assistant",
+                 "content": "HECHO-T5 extra %d" % i}]
+            ).split(": ", 1)[1]
+        p._RECALL_PAGE = 2
+        p._RECALL_MAX_ITEMS = 2      # page1 full -> cap -> TRUNCATED
+        p.on_session_end([])
+        assert len(ck_recalls(vault)) == 1, "TRUNCATED: no band reads"
+        assert not vault.captured
+    check("T5 initial TRUNCATED: aborted, no band", t5_test)
+
+    def t6_test():
+        vault, p, k = s_mk("gw-T6")
+        seed_receipt(vault, k, "gw-T6")
+        vault.no_match_recall_index = {"checkpoint": [0]}
+        p.on_session_end([])
+        assert len(ck_recalls(vault)) == 1, \
+            "no_match + receipts present: no band"
+        assert not vault.captured
+    check("T6 initial no_match + receipts: no band", t6_test)
 
     # ---- M (R3 tri-state): the defensive cap yields TRUNCATED, which
     #      must be treated as failure: cycle aborts, nothing consumed.

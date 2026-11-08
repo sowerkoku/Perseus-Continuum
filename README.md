@@ -2,7 +2,7 @@ Based on **Perseus Vault** by Perseus-Computing-LLC (_discontinued project (remo
 
 ---
 
-# Perseus Vault
+# Perseus Continuum
 
 > **Persistent, encrypted memory for AI agents. One Rust binary, one file, no cloud.**
 

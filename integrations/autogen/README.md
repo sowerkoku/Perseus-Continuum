@@ -40,7 +40,7 @@ async def main():
 
     agent = AssistantAgent(
         name="assistant",
-        model_client=OpenAIChatCompletionClient(model="gpt-4o"),
+        model_client=OpenAIChatCompletionClient(model="your-model-id"),
         memory=[memory],
     )
 

@@ -46,7 +46,7 @@ agent = Agent(
     role="Assistant",
     goal="Help the user with their tasks",
     backstory=f"Previous context: {context}",
-    llm="gpt-4o-mini",
+    llm="your-model-id",
 )
 
 task = Task(

@@ -20,7 +20,7 @@ Example
 >>> from perseus_vault_pydantic_ai import perseus_vault_capability
 >>>
 >>> memory = perseus_vault_capability(binary="perseus-vault", db_path="./agent.db")
->>> agent = Agent("openai:gpt-5", capabilities=[memory])
+>>> agent = Agent("openai:your-model-id", capabilities=[memory])
 >>> async with agent:
 ...     result = await agent.run("Remember that I prefer metric units.")
 

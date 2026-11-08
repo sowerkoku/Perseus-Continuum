@@ -868,8 +868,8 @@ enum Commands {
         /// the model profile. Default: 1500 (recall-first default profile).
         #[arg(long)]
         max_context_chars: Option<i64>,
-        /// Host model name for budget-profile resolution (#366) — e.g. an
-        /// "opus" model gets a larger budget. Unknown models use the default.
+        /// Host model name for budget-profile resolution (#366).
+        /// Large-context models get a larger budget. Unknown ones use the default.
         #[arg(long)]
         model: Option<String>,
         /// Opt back into the legacy unconditional top-N context dump instead
@@ -5321,7 +5321,7 @@ mod tests {
             "--max-context-chars",
             "800",
             "--model",
-            "claude-opus-4-8",
+            "large-window-model",
             "--legacy-context",
         ]);
         match cli.command {
@@ -5332,7 +5332,7 @@ mod tests {
                 ..
             }) => {
                 assert_eq!(max_context_chars, Some(800));
-                assert_eq!(model.as_deref(), Some("claude-opus-4-8"));
+                assert_eq!(model.as_deref(), Some("large-window-model"));
                 assert!(legacy_context);
             }
             _ => panic!("expected prepare subcommand"),

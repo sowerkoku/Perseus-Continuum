@@ -39,7 +39,7 @@ from perseus_vault_pydantic_ai import perseus_vault_capability
 
 memory = perseus_vault_capability(binary="perseus-vault", db_path="./agent.db")
 
-agent = Agent("openai:gpt-5", capabilities=[memory])
+agent = Agent("openai:your-model-id", capabilities=[memory])
 
 async def main():
     async with agent:
@@ -60,7 +60,7 @@ If you'd rather pass a toolset directly instead of a capability:
 from pydantic_ai import Agent
 from perseus_vault_pydantic_ai import perseus_vault_toolset
 
-agent = Agent("openai:gpt-5", toolsets=[perseus_vault_toolset(db_path="./agent.db")])
+agent = Agent("openai:your-model-id", toolsets=[perseus_vault_toolset(db_path="./agent.db")])
 ```
 
 ### Restricting the tool surface

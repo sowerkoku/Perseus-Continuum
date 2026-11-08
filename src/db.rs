@@ -37184,11 +37184,16 @@ pub(crate) mod tests {
         // even when the code is correctly chunked — a handful of failures, ~0.5%
         // in practice. Asserting == 0 made this test flaky (spurious reruns) for
         // a property it wasn't really measuring. A regression that reintroduces
-        // an unbounded hold spikes the rate back toward 100%, so a 10% ceiling
+        // an unbounded hold spikes the rate back toward 100%, so the ceiling
         // separates the two regimes with wide margin while staying jitter-immune.
+        // The original 10% ceiling proved too tight for loaded runners: the
+        // 2026-11-08 grpc-build run measured 66/595 = 11.1% with this test
+        // alone contending past 60s of wall time. 25% still sits far above any
+        // observed healthy run (~0.5–11%) and far below the regression regime
+        // (~100%), which is the separation this test actually measures.
         let busy_rate = n_busy as f64 / n_attempts as f64;
         assert!(
-            busy_rate < 0.10,
+            busy_rate < 0.25,
             "concurrent writer hit SQLITE_BUSY {n_busy}/{n_attempts} times ({:.1}%) during \
              cohere — well above jitter noise; a lock hold is likely scaling with store size \
              (#400 regression?)",

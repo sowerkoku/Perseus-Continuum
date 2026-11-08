@@ -1,8 +1,8 @@
-Based on 
-# Perseus Vault
-by Perseus-Computing-LLC
+Based on **Perseus Vault** by Perseus-Computing-LLC
 
 ---
+
+# Perseus Vault
 
 > **Persistent, encrypted memory for AI agents. One Rust binary, one file, no cloud.**
 

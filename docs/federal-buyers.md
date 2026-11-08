@@ -103,8 +103,6 @@ Perseus and Perseus Vault address multiple government AI priorities:
 | CAGE Code | 22JC5 |
 | NAICS Codes | 541715 (Primary), 541511, 541512 |
 | SBIR Registry | [Pending] |
-| Website | https://perseus.observer |
-| Contact | perseus@perseus.observer |
 | GitHub | https://github.com/Perseus-Computing-LLC |
 
 ---
@@ -124,7 +122,7 @@ perseus-vault --help
 ```
 
 **For procurement inquiries, security assessments, or ATO support:**
-Email perseus@perseus.observer.
+Use GitHub Private Vulnerability Reporting or the GitHub repository contact options.
 
 > **Claim boundary:** procurement identifiers and readiness details in this
 > document are owner-published, dated claims. “CMMC Level 2 self-assessment”

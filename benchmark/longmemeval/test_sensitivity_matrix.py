@@ -201,7 +201,7 @@ class SensitivityMatrixContractTests(unittest.TestCase):
 
     def test_schema_is_versioned_strict_and_covers_required_axes(self):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(schema["$id"], "https://perseus.observer/schemas/longmemeval-sensitivity-matrix-v1.json")
+        self.assertNotIn("$id", schema)
         self.assertEqual(schema["additionalProperties"], False)
         self.assertEqual(schema["$defs"]["metrics"]["additionalProperties"], False)
         required = set(schema["required"])

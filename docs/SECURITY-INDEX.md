@@ -47,7 +47,7 @@ access can be reviewed and revoked. No keys or tokens appear here.
 | Merge to protected `main` | via PR + required `test` check | ✅ Verified: `main` is protected and requires the `test` status check. No direct pushes. |
 | Release / publish (crates.io, GHCR, MCP registry) | `[CONFIRM token holder(s)]` | Publishing credentials held out-of-band, not in repo |
 | Release signing / provenance | *none yet* | Signed releases + SLSA provenance are a tracked milestone (§ SECURITY-MILESTONES) |
-| Security disclosure — primary handler | Thomas Connally (perseus@perseus.observer) | See [`vuln-response.md`](./vuln-response.md) |
+| Security disclosure — primary handler | Thomas Connally | See [`vuln-response.md`](./vuln-response.md) |
 | Security disclosure — backup handler | Mark Thrailkill (mark@perseus.observer) | Covers when primary is unavailable |
 
 > **Review cadence:** revisit this register whenever a team member joins/leaves,

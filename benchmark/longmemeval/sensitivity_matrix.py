@@ -16,7 +16,6 @@ from pathlib import Path as _s1138_Path
 from typing import Mapping as _s1138_Mapping
 
 _s1138_SCHEMA_VERSION = "perseus-vault-longmemeval-sensitivity/v1"
-_s1138_SCHEMA_ID = "https://perseus.observer/schemas/longmemeval-sensitivity-matrix-v1.json"
 _s1138_ID_RE = _s1138_re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _s1138_SHA_RE = _s1138_re.compile(r"^[0-9a-f]{64}$")
 _s1138_PROMPT_LANES = {"official-cot", "production-generic"}

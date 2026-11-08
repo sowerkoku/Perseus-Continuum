@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate perseus.observer/benchmarks from the signed benchmark reports (#477).
+"""Generate the benchmark index page from the signed benchmark reports (#477).
 
 The page is GENERATED, never hand-typed: every number renders from a committed
 benchmark/*/report.json (each carrying a sha256 signature over its result set,
@@ -537,19 +537,19 @@ def main():
 <title>Perseus Vault benchmarks: reproducible numbers, signed reports</title>
 <script>try{{var t=localStorage.getItem('perseus-theme');if(t)document.documentElement.setAttribute('data-theme',t)}}catch(e){{}}</script>
 <link rel="icon" href="/assets/perseus.svg">
-<link rel="canonical" href="https://perseus.observer/benchmarks/">
+<!-- canonical omitted: site retired -->
 <meta name="description" content="Reproducible agent-memory benchmarks: LongMemEval retrieval recall, bi-temporal correctness, and BEAM correctness + determinism at scale (128K to 10M tokens). Every number generated from a signed report with a script you can rerun.">
 <meta name="theme-color" content="#0A0A12">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Perseus">
 <meta property="og:title" content="Perseus Vault benchmarks">
 <meta property="og:description" content="Every number here has a script. Signed reports, named models, reproducible offline.">
-<meta property="og:url" content="https://perseus.observer/benchmarks/">
+
 <link rel="stylesheet" href="/assets/fonts.css">
 <link rel="stylesheet" href="/assets/tokens.css">
 <link rel="stylesheet" href="/assets/perseus.css">
 <style>{PAGE_CSS}</style>
-<script defer src="https://stats.perseus.observer/script.js" data-website-id="74dc0a11-f2dd-4d6f-b0b7-4a550116bbe5"></script>
+
 </head>
 <body>
 <header class="site">
@@ -575,7 +575,7 @@ def main():
   <div class="foot-compact">
     <div class="brand-line">
       <svg width="26" height="26" viewBox="0 0 56 56" fill="none" aria-hidden="true"><rect x="3" y="14" width="17" height="3.6" rx="1.8" fill="var(--violet)"/><rect x="3" y="21" width="17" height="3.6" rx="1.8" fill="var(--violet)" fill-opacity=".75"/><rect x="3" y="28" width="17" height="3.6" rx="1.8" fill="var(--violet)" fill-opacity=".55"/><rect x="3" y="35" width="17" height="3.6" rx="1.8" fill="var(--violet)" fill-opacity=".4"/><g stroke="var(--amber)" stroke-width="2.4" stroke-linecap="round"><line x1="22" y1="16" x2="42" y2="28"/><line x1="22" y1="23" x2="42" y2="28"/><line x1="22" y1="30" x2="42" y2="28"/><line x1="22" y1="37" x2="42" y2="28"/></g><circle cx="44" cy="28" r="4.2" fill="var(--amber)"/></svg>
-      <span class="legal-line">Perseus Computing LLC · generated {today} at {esc(commit)} · perseus.observer/benchmarks</span>
+      <span class="legal-line">Perseus Computing LLC · generated {today} at {esc(commit)}</span>
     </div>
     <div class="sib"><a href="/">Perseus</a><a href="/perseus-vault/">Perseus Vault</a><a href="/ledger/">Ledger</a><a href="{GITHUB}">GitHub</a></div>
   </div>

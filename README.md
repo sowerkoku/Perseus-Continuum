@@ -5,7 +5,6 @@
 [![Build and Test](https://img.shields.io/github/actions/workflow/status/sowerkoku/Perseus-Continuum/test.yml)](https://github.com/sowerkoku/Perseus-Continuum/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/github/license/sowerkoku/Perseus-Continuum)](./LICENSE)
 [![Release](https://img.shields.io/github/v/release/sowerkoku/Perseus-Continuum)](https://github.com/sowerkoku/Perseus-Continuum/releases)
-[![Glama](https://glama.ai/mcp/servers/sowerkoku/Perseus-Continuum/badge)](https://glama.ai/mcp/servers/sowerkoku/Perseus-Continuum)
 [![LangGraph](https://img.shields.io/badge/integrations-LangGraph-blue)](integrations/langgraph/)
 [![CrewAI](https://img.shields.io/badge/integrations-CrewAI-orange)](integrations/crewai/)
 [![AutoGen](https://img.shields.io/badge/integrations-AutoGen-purple)](integrations/autogen/)

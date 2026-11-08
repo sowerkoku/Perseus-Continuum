@@ -62,7 +62,7 @@ async def main():
 
     agent = Agent(
         name="perseus_vault_agent",
-        model="gemini-2.5-flash",
+        model="your-model-id",
         instruction="You have persistent memory across sessions.",
     )
 

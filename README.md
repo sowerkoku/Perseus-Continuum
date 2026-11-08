@@ -781,7 +781,7 @@ handing the host a standing blob to staple into every system prompt.
   no topical injection: the block is a compact retrieval pointer, byte-stable
   across unrelated vault writes (prefix-cache friendly).
 - **Per-model recall budget** — output is clamped to a character budget resolved
-  from the host model: default/lean profile 1500 chars; large-window ("opus")
+  from the host model: default/lean profile 1500 chars; large-context-model
   profile 6000 chars; `max_context_chars` overrides both.
 - **Capped always-on** — `always_on: true` still works for identity-critical
   facts, but the recall-first set is hard-capped (top 5) and overflow emits a
@@ -791,7 +791,7 @@ handing the host a standing blob to staple into every system prompt.
   you pass a budget.
 
 ```bash
-perseus-vault prepare --task "deploying the payments service" --model claude-sonnet-4-6
+perseus-vault prepare --task "deploying the payments service" --model your-host-model
 perseus-vault prepare --task "..." --max-context-chars 800     # explicit budget
 perseus-vault prepare --task "..." --legacy-context            # old dump, opt-in
 ```

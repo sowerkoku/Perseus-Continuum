@@ -169,7 +169,7 @@ Pass the Bearer token via the connector's `authorization_token` field:
 
 ```python
 client.beta.messages.create(
-    model="claude-opus-4-8",
+    model="your-host-model",
     mcp_servers=[{
         "type": "url",
         "url": "https://perseus-vault-mcp.example.com/sse",

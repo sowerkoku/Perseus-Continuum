@@ -237,7 +237,7 @@ SCHEMAS = json.loads(r"""[
     },
     "model": {
      "type": "string",
-     "description": "Host model name for recall-budget profile resolution (#366), e.g. 'claude-opus-4-8' gets a larger budget. Unknown/omitted models use the default 1500-char profile."
+     "description": "Host model name for recall-budget profile resolution (#366), large-context models get a larger budget. Unknown/omitted models use the default 1500-char profile."
     },
     "max_context_chars": {
      "type": "integer",

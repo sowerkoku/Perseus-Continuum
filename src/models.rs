@@ -1544,7 +1544,7 @@ pub struct ContextOptions {
     /// this is set (legacy output is otherwise unclamped).
     pub max_context_chars: Option<i64>,
     /// Host model name for budget-profile resolution (e.g.
-    /// "claude-opus-4-8"). Unknown/absent models use the default profile.
+    /// a large-window model ID). Unknown/absent models use the default profile.
     pub model: Option<String>,
     /// Entity ids to exclude from the topical section (used by `prepare`,
     /// which renders recall_when hits in its own section and must not show

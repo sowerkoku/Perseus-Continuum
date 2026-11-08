@@ -8,6 +8,7 @@
 [![LangGraph](https://img.shields.io/badge/integrations-LangGraph-blue)](integrations/langgraph/)
 [![CrewAI](https://img.shields.io/badge/integrations-CrewAI-orange)](integrations/crewai/)
 [![AutoGen](https://img.shields.io/badge/integrations-AutoGen-purple)](integrations/autogen/)
+[![Hermes](https://img.shields.io/badge/integrations-Hermes-gold)](integrations/hermes/)
 
 Give your agents memory that survives the session, so they stop re-deriving what they
 already learned and stop repeating past mistakes. Hybrid recall (BM25 + dense + RRF),

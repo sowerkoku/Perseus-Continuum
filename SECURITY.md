@@ -139,15 +139,20 @@ on-disk state.
 ### RustSec triage
 
 `cargo audit --deny warnings` runs on every push, every PR, and weekly against
-the live advisory database (`.github/workflows/audit.yml`). As of 2026-08-16 the
-scan reports **0 vulnerabilities** across 438 locked dependencies. Two
-*unmaintained* advisories (informational severity — not exploitable
-vulnerabilities) are explicitly accepted, with justification, in that workflow:
+the live advisory database (`.github/workflows/audit.yml`). As of 2026-11-08 the
+scan is green: the 2026-10/11 advisory wave (rustls, rustls-webpki, webpki-roots,
+webpki-root-certs, zip — 11 advisories) was cleared by version bumps
+(rustls ≥0.23.46, rustls-webpki ≥0.103.16, webpki-roots/-root-certs ≥1.0.10,
+zip 2→9; the `multimodal` DOCX reader/writer uses only the `by_name` /
+`ZipWriter` API surface, unchanged across that bump). Four *informational*
+advisories are explicitly accepted, with justification, in that workflow:
 
 | Advisory | Crate | Why it is accepted |
 |---|---|---|
 | RUSTSEC-2024-0436 | `paste` 1.0.15 | Unmaintained, but a proc-macro: it executes only at compile time and adds no runtime attack surface. Reachable only through `tokenizers`, whose newest release still pins it — no patched version exists. |
 | RUSTSEC-2026-0192 | `ttf-parser` 0.25.1 | Unmaintained. Compiled only in the opt-in `multimodal` build (local PDF text extraction via `pdf-extract`/`lopdf`); the default binary does not contain it. The newest `lopdf` release still pins it — no patched version exists. |
+| RUSTSEC-2024-0449 | `unsafe-libyaml` 0.2.11 | Unmaintained (informational). Transitive via `serde_yaml` (MCPB/registry config parsing); the upstream C-binding shim has no patched release and `serde_yaml`'s newest release still pins it — no upgrade path exists without replacing the YAML stack. |
+| RUSTSEC-2026-0386 | `tokio` 1.52.x | `unsound` warning scoped to `tokio::io::AsyncFd` I/O-safety constructors. The `AsyncFd` API is not used anywhere in this codebase (grep-verified); no other tokio surface is affected and no exploit is published. Revisit on the next tokio upgrade. |
 
 Both chains were re-verified against crates.io on 2026-08-16: every crate in
 each chain is at its newest release and the newest releases still carry these

@@ -67,7 +67,7 @@ tokio-stream = { version = "0.1", optional = true }
 # in-tree XML text stripping; PDF via `pdf-extract`. Kept OUT of the default
 # build so the lean single-binary / zero-dependency story is unchanged; enable
 # with `--features multimodal`. All extraction is local (no cloud, no network).
-zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+zip = { version = "9", optional = true, default-features = false, features = ["deflate"] }
 pdf-extract = { version = "0.12", optional = true }
 ed25519-dalek = { version = "2", features = ["std"] }
 

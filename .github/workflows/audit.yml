@@ -30,6 +30,11 @@ jobs:
       # cannot block a security release; revisit the ignore list as they clear.
       #   RUSTSEC-2024-0436 — paste (unmaintained, proc-macro, compile-time only)
       #   RUSTSEC-2026-0192 — ttf-parser (unmaintained; only via opt-in multimodal)
+      #   RUSTSEC-2024-0449 — unsafe-libyaml (unmaintained; transitive via
+      #     serde_yaml, no patched release exists — see SECURITY.md)
+      #   RUSTSEC-2026-0386 — tokio AsyncFd I/O-safety unsoundness (the
+      #     AsyncFd API is not used anywhere in this codebase; warning-only,
+      #     no exploitable vulnerability — see SECURITY.md)
       # Triage rationale is documented in SECURITY.md ("RustSec triage").
       - name: cargo audit
-        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0192
+        run: cargo audit --deny warnings --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2024-0449 --ignore RUSTSEC-2026-0386

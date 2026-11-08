@@ -4,7 +4,7 @@
 #  Persistent memory engine for AI agents — MCP JSON-RPC stdio server
 #
 #  Usage:
-#    curl -sSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/bootstrap.sh | bash
+#    curl -sSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/bootstrap.sh | bash
 #
 #  What this does:
 #    1. Installs system dependencies (Rust toolchain via rustup, build tools)
@@ -36,7 +36,7 @@ header() { printf "\n${BOLD}══ %s ══${NC}\n" "$*"; }
 FORCE="${FORCE:-0}"
 # Repo redirects from the historical perseus_vault/perseus-vault names, but use the canonical
 # one so the clone URL matches what users see everywhere else.
-VAULT_REPO="https://github.com/Perseus-Computing-LLC/perseus-vault.git"
+VAULT_REPO="https://github.com/sowerkoku/Perseus-Continuum.git"
 # Script-local dirs. NOTE: PERSEUS_VAULT_DB_PATH is the *real* env var the binary reads
 # (see default_db_path() in src/main.rs), so it keeps its name for compatibility;
 # the default filename is the canonical perseus-vault.db.
@@ -50,7 +50,7 @@ echo ""
 echo "============================================"
 echo "  Perseus Vault One-Shot Bootstrap"
 echo "  Persistent memory engine for AI agents"
-echo "  github.com/Perseus-Computing-LLC/perseus-vault"
+echo "  github.com/sowerkoku/Perseus-Continuum"
 echo "============================================"
 
 # ── Step 1: System dependencies ─────────────────────────────────────────────
@@ -297,5 +297,5 @@ echo "  Quick commands:"
 echo "    perseus-vault serve --db $PERSEUS_VAULT_DB_PATH   # Start MCP server"
 echo "    perseus-vault --version                   # Show version"
 echo ""
-echo "  Docs: https://github.com/Perseus-Computing-LLC/perseus-vault"
+echo "  Docs: https://github.com/sowerkoku/Perseus-Continuum"
 echo "============================================"

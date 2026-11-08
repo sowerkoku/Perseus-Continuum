@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # Perseus Vault one-line installer
-# Usage: curl -sSf https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/install.sh | sh
+# Usage: curl -sSf https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/install.sh | sh
 #
 # Prebuilt binaries (published as .tar.gz + .sha256):
 #   - macOS Apple Silicon (aarch64)      — full build
 #   - Linux x86_64 (glibc)               — full build
 #   - Linux aarch64 (musl)               — 'lite' build (no bundled embedding model)
 # Intel macOS (x86_64), Windows, and aarch64-linux-full: build from source
-#   (cargo install --git https://github.com/Perseus-Computing-LLC/perseus-vault).
+#   (cargo install --git https://github.com/sowerkoku/Perseus-Continuum).
 
 BOLD="\033[1m"
 GREEN="\033[32m"
@@ -17,7 +17,7 @@ YELLOW="\033[33m"
 RED="\033[31m"
 RESET="\033[0m"
 
-REPO="Perseus-Computing-LLC/perseus-vault"
+REPO="sowerkoku/Perseus-Continuum"
 BIN_DIR="${PERSEUS_VAULT_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${PERSEUS_VAULT_VERSION:-latest}"
 

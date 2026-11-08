@@ -6,7 +6,7 @@
 >
 > **Origin:** The native Hermes MemoryProvider integration was originally
 > contributed by [sowerkoku](https://github.com/sowerkoku) in
-> [#908](https://github.com/Perseus-Computing-LLC/perseus-vault/pull/908);
+> #908;
 > the integration is maintained by Perseus Computing.
 
 ## Repository Structure
@@ -286,7 +286,7 @@ dynamically discovered schemas would be missing on turn 1.
 ```bash
 PERSEUS_VAULT_MCP_TOKEN=your-token-here \
 PERSEUS_VAULT_URL=http://ip-server:port/message \
-  curl -fsSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/integrations/hermes/install-perseus-vault.py | python3
+  curl -fsSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/integrations/hermes/install-perseus-vault.py | python3
 ```
 
 The token is **required** in non-interactive mode — the installer refuses
@@ -296,7 +296,7 @@ to run with a placeholder. It persists the token to `$HERMES_HOME/.env`
 ### Interactive
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/integrations/hermes/install-perseus-vault.py > install-perseus-vault.py
+curl -fsSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/integrations/hermes/install-perseus-vault.py > install-perseus-vault.py
 python3 install-perseus-vault.py
 # Prompts: local/remote → IP:port → token (required)
 ```
@@ -401,7 +401,7 @@ session-end capture):
 ## References
 
 - **Hermes MemoryProvider Plugin Spec**: https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin
-- **Perseus Vault Lifecycle Hooks**: https://github.com/Perseus-Computing-LLC/perseus-vault/blob/main/docs/lifecycle-hooks.md
+- **Perseus Vault Lifecycle Hooks**: https://github.com/sowerkoku/Perseus-Continuum/blob/main/docs/lifecycle-hooks.md
 
 ## License
 

@@ -33,7 +33,7 @@ if str(REPO) not in sys.path:
 from benchmark.longmemeval.public_claims import load_public_claim
 BENCH = REPO / "benchmark"
 
-GITHUB = "https://github.com/Perseus-Computing-LLC/perseus-vault"
+GITHUB = "https://github.com/sowerkoku/Perseus-Continuum"
 
 
 def load(rel):
@@ -560,7 +560,7 @@ def main():
     </a>
     <nav class="navlinks">
       <a href="/perseus-vault/">Perseus Vault</a>
-      <a href="https://github.com/Perseus-Computing-LLC/perseus-vault">GitHub</a>
+      <a href="https://github.com/sowerkoku/Perseus-Continuum">GitHub</a>
     </nav>
   </div>
 </header>

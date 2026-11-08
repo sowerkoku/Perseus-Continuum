@@ -11,3 +11,4 @@ __pycache__/
 # LongMemEval QA harness artifacts (dataset is a 277 MB public download; hypotheses are per-run)
 benchmark/longmemeval/longmemeval_*_cleaned.json
 benchmark/longmemeval/hypotheses-*.jsonl
+__pycache__/

@@ -34,7 +34,7 @@ artifact: [`benchmark/lambda/results/competitors.json`](../../benchmark/lambda/r
 ## Measured: LOCOMO head-to-head (their own harness)
 
 LOCOMO long-term conversational-memory benchmark, run on **mem0's own harness**
-([our fork](https://github.com/Perseus-Computing-LLC/memory-benchmarks) of
+(our fork of
 `mem0ai/memory-benchmarks`), not a home-grown script. Categories 1–4, 1,540
 questions, top-200 retrieval, gpt-5 answerer + judge (OpenAI), 2026-07-22:
 
@@ -60,7 +60,7 @@ Disclosures:
   Mem0 Platform took ~11–45s per session in our runs.
 
 Full per-question results, configs, and judge outputs:
-**[memory-benchmarks / LEADERBOARD.md](https://github.com/Perseus-Computing-LLC/memory-benchmarks)**
+**memory-benchmarks / LEADERBOARD.md**
 
 ## When to Use Perseus Vault
 

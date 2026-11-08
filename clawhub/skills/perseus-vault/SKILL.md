@@ -85,14 +85,14 @@ Choose one:
 **Download binary (fastest):**
 ```bash
 # Linux x86_64
-curl -L https://github.com/Perseus-Computing-LLC/perseus-vault/releases/latest/download/perseus-vault-x86_64-unknown-linux-gnu -o perseus-vault
+curl -L https://github.com/sowerkoku/Perseus-Continuum/releases/latest/download/perseus-vault-x86_64-unknown-linux-gnu -o perseus-vault
 chmod +x perseus-vault
 sudo mv perseus-vault /usr/local/bin/
 ```
 
 **Build from source (requires Rust):**
 ```bash
-git clone https://github.com/Perseus-Computing-LLC/perseus-vault.git
+git clone https://github.com/sowerkoku/Perseus-Continuum.git
 cd perseus-vault
 cargo build --release
 sudo cp target/release/perseus-vault /usr/local/bin/
@@ -100,7 +100,7 @@ sudo cp target/release/perseus-vault /usr/local/bin/
 
 **Install the prebuilt binary (alternative to building from source):**
 ```bash
-curl -sSf https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/install.sh | sh
+curl -sSf https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/install.sh | sh
 ```
 
 ### Step 2 — Configure Perseus Vault as an MCP server in OpenClaw
@@ -214,7 +214,7 @@ perseus-vault --db ~/.openclaw/perseus-vault/perseus-vault.db --vault-export ~/p
 
 ## Links
 
-- GitHub: https://github.com/Perseus-Computing-LLC/perseus-vault
+- GitHub: https://github.com/sowerkoku/Perseus-Continuum
 - Website: https://perseus.observer/perseus-vault
 - Smithery: https://smithery.ai/server/perseus-vault
 - mcpservers.org: https://mcpservers.org/servers/perseus-computing-llc/perseus-vault

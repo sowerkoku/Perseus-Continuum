@@ -6,7 +6,7 @@ Perseus Vault is an MCP stdio server. It works with **any** MCP-compatible clien
 
 ```bash
 # Install Perseus Vault
-curl -sSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/bootstrap.sh | bash
 
 # Create data directory
 mkdir -p ~/.perseus-vault/data

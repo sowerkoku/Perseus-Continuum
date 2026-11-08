@@ -386,7 +386,7 @@ Do not store secrets, credentials, or transient scratch state as memories.
 
 Even with hooks configured, keeping rule 2 in your instructions file is
 recommended — hooks cover start/stop; mid-session capture is still
-agent-initiated, though [#520](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/520)'s
+agent-initiated, though #520's
 `capture` verb/tool ([Automatic capture](#automatic-capture-520)) means the
 agent only has to hand over the raw material, not shape each memory itself.
 
@@ -440,11 +440,11 @@ client and (optionally) the hooks above installed:
 
 ## Related work
 
-- [#520 — Automatic in-session memory capture via lifecycle hooks](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/520):
+- #520 — Automatic in-session memory capture via lifecycle hooks:
   shipped as the `capture` verb + `perseus_vault_capture` tool — see
   [Automatic capture](#automatic-capture-520) above and
   [docs/capture.md](capture.md).
-- [#521 — Failure-pattern / déjà-vu guard](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/521):
+- #521 — Failure-pattern / déjà-vu guard:
   a pre-retry check that will slot naturally into `PreToolUse`-style hooks.
 - [docs/clients/README.md](clients/README.md) — MCP server config snippets for
   every client (the prerequisite for everything above).

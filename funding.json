@@ -21,7 +21,7 @@
         "wellKnown": "https://perseus-vault.perseus.observer/.well-known/funding-manifest-urls"
       },
       "repositoryUrl": {
-        "url": "https://github.com/Perseus-Computing-LLC/perseus-vault",
+        "url": "https://github.com/sowerkoku/Perseus-Continuum",
         "wellKnown": ""
       },
       "licenses": [

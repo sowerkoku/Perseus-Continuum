@@ -2638,7 +2638,7 @@ class PerseusVaultProvider(MemoryProvider):
                 "secret": True,
                 "required": True,
                 "env_var": "PERSEUS_VAULT_MCP_TOKEN",
-                "url": "https://github.com/Perseus-Computing-LLC/perseus-vault",
+                "url": "https://github.com/sowerkoku/Perseus-Continuum",
             },
             {
                 "key": "url",

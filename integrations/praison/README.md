@@ -2,7 +2,7 @@
 
 A drop-in [`MemoryProtocol`](https://github.com/MervinPraison/PraisonAI) backend
 that gives [PraisonAI](https://docs.praison.ai) agents persistent, **local-first,
-offline** memory backed by [Perseus Vault](https://github.com/Perseus-Computing-LLC/perseus-vault).
+offline** memory backed by [Perseus Vault](https://github.com/sowerkoku/Perseus-Continuum).
 
 Perseus Vault is a single static binary (SQLite + FTS5 + bundled ONNX
 embeddings, optional AES-256-GCM) — no external memory service, no network, no
@@ -20,7 +20,7 @@ pip install ./integrations/praison  # this adapter
 Then put the `perseus-vault` binary on `PATH` (single static binary, no deps):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/bootstrap.sh | bash
 ```
 
 ## Use it

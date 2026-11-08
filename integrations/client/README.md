@@ -1,7 +1,7 @@
 # Perseus Vault — Python Client
 
 The official, **dependency-free** Python client for driving a local
-[`perseus-vault`](https://github.com/Perseus-Computing-LLC/perseus-vault) binary
+[`perseus-vault`](https://github.com/sowerkoku/Perseus-Continuum) binary
 over its MCP JSON-RPC 2.0 **stdio** transport (`perseus-vault serve`).
 
 ## Why this exists
@@ -34,7 +34,7 @@ pip install perseus-vault-client
 You also need the `perseus-vault` binary (single static file, no deps):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/bootstrap.sh | bash
 ```
 
 ## Usage

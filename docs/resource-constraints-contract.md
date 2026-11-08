@@ -18,8 +18,8 @@ Legacy AAR records remain readable and unconstrained legacy clients remain
 compatible. Capabilities that require constraints must not treat absent fields
 as approval.
 
-Related issue: https://github.com/Perseus-Computing-LLC/hermes-plugin-perseus-vault/issues/10
-Ledger projection: https://github.com/Perseus-Computing-LLC/ledger/issues/183
-Vault authority lifecycle: https://github.com/Perseus-Computing-LLC/perseus-vault/issues/768
+Related issue: plugin repository #10 (repository no longer available)
+Ledger projection: Ledger #183 (repository no longer available)
+Vault authority lifecycle: #768
 
 Status: locally verified only until provider and Ledger PRs are landed.

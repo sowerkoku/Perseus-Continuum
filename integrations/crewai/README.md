@@ -69,6 +69,6 @@ a shared knowledge base over time.
 
 ## Requirements
 
-- Perseus Vault v1.0.0+ (`curl -sSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/bootstrap.sh | bash`)
+- Perseus Vault v1.0.0+ (`curl -sSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/bootstrap.sh | bash`)
 - CrewAI >= 0.30.0
 - Python 3.10+

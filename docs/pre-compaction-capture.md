@@ -1,6 +1,6 @@
 # Pre-compaction capture pipeline
 
-This document defines the ordering guarantee implemented for [#780](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/780).
+This document defines the ordering guarantee implemented for #780.
 
 ## Guarantee
 

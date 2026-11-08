@@ -40,7 +40,7 @@ Full artifact: [`benchmark/lambda/results/competitors.json`](../../benchmark/lam
 ## Measured: LOCOMO head-to-head (mem0's harness)
 
 LOCOMO long-term conversational-memory benchmark, run on mem0's own harness
-([our fork](https://github.com/Perseus-Computing-LLC/memory-benchmarks) of
+(our fork of
 `mem0ai/memory-benchmarks`). Categories 1–4, 1,540 questions, top-200
 retrieval, gpt-5 answerer + judge (OpenAI), 2026-07-22:
 
@@ -68,7 +68,7 @@ Zep-specific findings:
 Zep Cloud Flex is Zep's current hosted offering — this measures the
 frontier-model configuration, not the local-extraction path measured above.
 Full per-question results and configs:
-**[memory-benchmarks / LEADERBOARD.md](https://github.com/Perseus-Computing-LLC/memory-benchmarks)**
+**memory-benchmarks / LEADERBOARD.md**
 
 ## Architecture
 

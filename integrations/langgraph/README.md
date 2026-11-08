@@ -81,6 +81,6 @@ LangGraph's BaseStore interface maps cleanly onto Perseus Vault's entity model:
 
 ## Requirements
 
-- Perseus Vault v1.0.0+ installed (`curl -sSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/bootstrap.sh | bash`)
+- Perseus Vault v1.0.0+ installed (`curl -sSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/bootstrap.sh | bash`)
 - LangGraph >= 0.2.0
 - Python 3.10+

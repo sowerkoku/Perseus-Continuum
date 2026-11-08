@@ -5,6 +5,6 @@
   "minAppVersion": "1.5.0",
   "description": "Bidirectional sync between Obsidian notes and the Perseus Vault persistent memory MCP server. Push notes to Perseus Vault as agent memories, pull Perseus Vault entities into Obsidian.",
   "author": "tcconnally",
-  "authorUrl": "https://github.com/Perseus-Computing-LLC/perseus-vault",
+  "authorUrl": "https://github.com/sowerkoku/Perseus-Continuum",
   "isDesktopOnly": true
 }

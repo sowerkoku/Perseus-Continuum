@@ -197,7 +197,7 @@ memory_bank_workspace: <64-hex>  # optional explicit workspace override
 ```
 
 The [Hermes memory provider](https://github.com/sowerkoku/hermes-plugin-perseus-vault)
-(`hermes plugins install Perseus-Computing-LLC/hermes-plugin-perseus-vault`)
+(`hermes plugins install Perseus-Continuum`, or from this repository; the previous plugin repository is no longer available)
 resolves the bank once per session and scopes every Vault read and write —
 prefetch recall, `perseus_recall` / `perseus_remember` / `perseus_forget`,
 session-end capture — to a dedicated workspace. Bank names map
@@ -888,7 +888,7 @@ Release binaries are built from tagged commits via [GitHub Actions](.github/work
 |----------|-------------|-------------|
 | `perseus-vault-<target>.tar.gz` | Full build (bundled embeddings, glibc) | SHA-256 checksum in `.sha256` sidecar |
 | `perseus-vault-lite-<target>.tar.gz` | Lean build (`--no-default-features`, musl/static) | SHA-256 checksum in `.sha256` sidecar |
-| SLSA provenance attestation | Sigstore-signed build provenance | `gh attestation verify <archive> --repo Perseus-Computing-LLC/perseus-vault` |
+| SLSA provenance attestation | Sigstore-signed build provenance | `gh attestation verify <archive> --repo sowerkoku/Perseus-Continuum` |
 
 ### Verify a release binary
 

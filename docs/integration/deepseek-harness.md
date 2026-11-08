@@ -13,7 +13,7 @@ connects two ways:
    recall itself.
 
 Both live in the dedicated integration repo:
-[`Perseus-Computing-LLC/perseus-vault-dsh`](https://github.com/Perseus-Computing-LLC/perseus-vault-dsh).
+`perseus-vault-dsh` (repository no longer available).
 
 > **Developer preview.** `dsh` iterates rapidly with compatibility-breaking
 > changes. The integration is tested against `dsh` `0.1.0-rc.6` and
@@ -24,7 +24,7 @@ Both live in the dedicated integration repo:
 ```bash
 # 1. Install Perseus Vault (pinned release)
 cargo install perseus-vault@2.23.0
-# or: curl -sSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/bootstrap.sh | bash
+# or: curl -sSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/bootstrap.sh | bash
 
 # 2. Grab the DSH overlay from the integration repo and run dsh with it
 npx @deepseek-ai/dsh web \
@@ -68,4 +68,4 @@ supplied via an ambient variable — never paste secrets into YAML.
 
 A controlled three-run matrix (control / MCP row / plugin-only) with a fact
 that no model can know a priori is committed in the integration repo at
-[`docs/VERIFICATION.md`](https://github.com/Perseus-Computing-LLC/perseus-vault-dsh/blob/main/docs/VERIFICATION.md).
+`docs/VERIFICATION.md` (from `perseus-vault-dsh`, repository no longer available).

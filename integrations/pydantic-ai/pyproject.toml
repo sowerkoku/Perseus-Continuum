@@ -25,8 +25,8 @@ dependencies = [
 dev = ["pytest", "pytest-asyncio"]
 
 [project.urls]
-Homepage = "https://github.com/Perseus-Computing-LLC/perseus-vault"
-Repository = "https://github.com/Perseus-Computing-LLC/perseus-vault"
+Homepage = "https://github.com/sowerkoku/Perseus-Continuum"
+Repository = "https://github.com/sowerkoku/Perseus-Continuum"
 
 [tool.setuptools]
 packages = ["perseus_vault_pydantic_ai"]

@@ -7,7 +7,7 @@
 #
 # ASSUMPTIONS (edit these two lines if your launch differs):
 PFS="${PFS:-/home/ubuntu/persist}"                 # mount point of your Persistent Filesystem
-REPO_URL="${REPO_URL:-https://github.com/Perseus-Computing-LLC/perseus-vault.git}"
+REPO_URL="${REPO_URL:-https://github.com/sowerkoku/Perseus-Continuum.git}"
 set -euo pipefail
 
 echo "==> [1/6] Persistent filesystem"

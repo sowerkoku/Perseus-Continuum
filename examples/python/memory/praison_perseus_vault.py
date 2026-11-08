@@ -14,7 +14,7 @@ Usage
     python examples/python/memory/praison_perseus_vault.py --db ./agent.db --recall-only
 
 Requires the `perseus-vault` binary on PATH (single static binary, no deps):
-    curl -sSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/bootstrap.sh | bash
+    curl -sSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/bootstrap.sh | bash
 """
 
 from __future__ import annotations

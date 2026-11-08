@@ -7,7 +7,7 @@ ideas.
 ## Development Setup
 
 ```bash
-git clone https://github.com/Perseus-Computing-LLC/perseus-vault.git
+git clone https://github.com/sowerkoku/Perseus-Continuum.git
 cd perseus-vault
 
 # Build (the pinned Rust 1.97.1 toolchain is selected automatically)
@@ -57,5 +57,5 @@ and [consolidation & deprecation-alias design](docs/specs/tool-consolidation-dep
 
 ## Questions?
 
-Open a [discussion](https://github.com/Perseus-Computing-LLC/perseus-vault/discussions) or file an
+Open a discussion or file an
 issue with the `question` label.

@@ -272,8 +272,8 @@ All notable changes to Perseus Vault are documented here. This project adheres t
 ### Added
 - **Hermes native MemoryProvider integration.** Originally contributed by
   [@sowerkoku](https://github.com/sowerkoku) in
-  [#908](https://github.com/Perseus-Computing-LLC/perseus-vault/pull/908),
-  overhauled in [#911](https://github.com/Perseus-Computing-LLC/perseus-vault/pull/911).
+  #908,
+  overhauled in #911.
 - **Deployment profiles (#870).** New `perseus_vault_deployment_profile` tool
   (registry 102→103): one machine-readable, runtime-derived answer to "what
   is this vault actually connected to?" — `offline` | `local_only` |

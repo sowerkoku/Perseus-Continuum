@@ -24,13 +24,13 @@ This document provides the analysis and rationale for federal procurement and SB
 - **Type:** Python CLI tool — live context engine for AI assistants
 - **Function:** Resolves directives (@query, @read, @services) into plain markdown output. Read-only — never writes to filesystem, never stores data, never makes network calls unless explicitly directed by user-authored directives.
 - **Distribution:** PyPI (public package registry)
-- **Source:** https://github.com/Perseus-Computing-LLC/perseus (public, MIT license)
+- **Source:** Perseus (public, MIT license; original GitHub repository no longer available)
 
 ### Perseus Vault (v2.0.0)
 - **Type:** Rust binary — persistent memory MCP server for AI agents
 - **Function:** Stores, searches, and retrieves structured entities via JSON-RPC 2.0 over stdio. Includes AES-256-GCM encryption (standard commercial algorithm). Optional embedding via public ONNX models. No cryptographic key management — keys are user-provided.
 - **Distribution:** GitHub Releases (public binary downloads)
-- **Source:** https://github.com/Perseus-Computing-LLC/perseus-vault (public, MIT license)
+- **Source:** https://github.com/sowerkoku/Perseus-Continuum (public, MIT license)
 
 ---
 

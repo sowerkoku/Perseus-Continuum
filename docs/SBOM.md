@@ -3,7 +3,7 @@
 
 **Package:** perseus_vault v2.0.0
 **License:** MIT
-**Repository:** https://github.com/Perseus-Computing-LLC/perseus-vault
+**Repository:** https://github.com/sowerkoku/Perseus-Continuum
 **Language:** Rust (edition 2021)
 **Format:** SPDX Lite / NTIA Minimum Elements
 

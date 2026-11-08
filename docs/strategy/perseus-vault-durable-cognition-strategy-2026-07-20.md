@@ -27,13 +27,13 @@ Vault should be the durable memory substrate for long-horizon continuity, explic
 - formalize memory taxonomy
 - define default precedence
 - improve source anchoring
-- add immutable content-addressed artifact manifests and exact evidence retrieval ([#811](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/811)); large source material should serve as compact, scope-aware manifests with deliberate exact retrieval, not be flattened into memory prose
+- add immutable content-addressed artifact manifests and exact evidence retrieval (#811); large source material should serve as compact, scope-aware manifests with deliberate exact retrieval, not be flattened into memory prose
 
 ### Next
 - correction and supersession improvements
 - long-horizon retention and decay controls
 - served-memory APIs for synthesis flows
-- add deterministic evidence-preserving log digests ([#812](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/812)): exact recurrence counts, severity-line preservation, chronological anchors, and retained originals
+- add deterministic evidence-preserving log digests (#812): exact recurrence counts, severity-line preservation, chronological anchors, and retained originals
 
 ### Later
 - policy packs for memory behavior

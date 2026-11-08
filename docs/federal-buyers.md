@@ -47,7 +47,7 @@ LOCOMO long-term conversational-memory benchmark — 1,540 questions (categories
 - **Air-gap relevance:** Perseus Vault is the only engine in this comparison that runs fully local (single binary, no cloud service) with instant time-to-searchable; both competitors are hosted cloud offerings (Mem0 Platform ~11–45s, Zep Cloud ~222s per session) that cannot operate in disconnected environments.
 - **Adversarial robustness:** On LOCOMO category 5 (adversarial, 446 questions) — the benchmark's robustness category for misleading evidence — Perseus Vault leads at 63.5% vs Mem0 55.6% and Zep 49.8%.
 
-Source and full per-question results: [Perseus-Computing-LLC/memory-benchmarks](https://github.com/Perseus-Computing-LLC/memory-benchmarks) (fork of `mem0ai/memory-benchmarks`). Disclosure: our Mem0 measurement is 9.4 points below Mem0's own published file, attributed to judge/platform drift.
+Source and full per-question results: Perseus-Computing-LLC/memory-benchmarks (fork of `mem0ai/memory-benchmarks`). Disclosure: our Mem0 measurement is 9.4 points below Mem0's own published file, attributed to judge/platform drift.
 
 ---
 
@@ -119,7 +119,7 @@ pip install perseus-ctx
 perseus --help
 
 # Perseus Vault — persistent memory (MCP server)
-# Download binary from https://github.com/Perseus-Computing-LLC/perseus-vault/releases
+# Download binary from https://github.com/sowerkoku/Perseus-Continuum/releases
 perseus-vault --help
 ```
 

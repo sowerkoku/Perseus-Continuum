@@ -52,7 +52,7 @@ var when spawning the server. Unparseable values are ignored with a warning.
 > key it on **age + orphaned parent** (PPID reparented to init), never on raw
 > process count.
 
-[#450]: https://github.com/Perseus-Computing-LLC/perseus-vault/issues/450
+[#450]: #450
 
 ## Quick start
 

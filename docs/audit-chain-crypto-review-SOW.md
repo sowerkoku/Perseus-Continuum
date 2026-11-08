@@ -2,7 +2,7 @@
 
 **Requestor:** Perseus Computing LLC — perseus@perseus.observer
 **Project:** Perseus Vault (open-source, MIT) — MCP-native local-first memory engine for AI agents
-**Repo:** https://github.com/Perseus-Computing-LLC/perseus-vault (Rust)
+**Repo:** https://github.com/sowerkoku/Perseus-Continuum (Rust)
 **Date:** 2026-07-05  **Prepared for:** OSTIF intake / crypto-audit firm quote
 
 ## 1. Objective

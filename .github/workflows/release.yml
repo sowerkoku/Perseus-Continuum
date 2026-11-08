@@ -197,7 +197,7 @@ jobs:
   # downloaded binary was built by THIS workflow from THIS repo:
   #
   #   gh attestation verify perseus-vault-lite-x86_64-unknown-linux-musl.tar.gz \
-  #     --repo Perseus-Computing-LLC/perseus-vault
+  #     --repo sowerkoku/Perseus-Continuum
   #
   # Attestations are signed via the Sigstore public-good instance (OIDC, no key
   # management on our side) and stored in the repo's attestation store. The

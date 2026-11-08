@@ -246,6 +246,6 @@ a small internal evaluation harness that spans retrieval, validity, compaction, 
 
 ## Follow-up implementation issues
 
-- Perseus: [#923](https://github.com/Perseus-Computing-LLC/perseus/issues/923) and [#924](https://github.com/Perseus-Computing-LLC/perseus/issues/924)
-- Perseus Vault: [#859](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/859) and [#860](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/860)
-- Ledger: [#219](https://github.com/Perseus-Computing-LLC/ledger/issues/219) and [#220](https://github.com/Perseus-Computing-LLC/ledger/issues/220)
+- Perseus: #923 and #924
+- Perseus Vault: #859 and #860
+- Ledger: #219 and #220

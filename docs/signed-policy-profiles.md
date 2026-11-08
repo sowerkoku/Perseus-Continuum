@@ -5,8 +5,8 @@ Date: 2026-08-04
 Resolves: #837
 Related: [Structured-truth retrieval policy](specs/structured-truth-retrieval-policy.md) ·
 AAR control plane (#768) ·
-release-provenance CI: [SLSA build provenance](https://github.com/Perseus-Computing-LLC/perseus-vault/pull/569) ·
-[reproducible signed release builds](https://github.com/Perseus-Computing-LLC/perseus-vault/pull/716)
+release-provenance CI: SLSA build provenance ·
+reproducible signed release builds
 
 ## What this is
 

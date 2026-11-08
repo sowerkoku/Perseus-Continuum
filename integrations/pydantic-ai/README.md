@@ -1,7 +1,7 @@
 # Perseus Vault — Pydantic AI Integration
 
 Give a [Pydantic AI](https://ai.pydantic.dev) agent persistent, **local-first**
-memory backed by [Perseus Vault](https://github.com/Perseus-Computing-LLC/perseus-vault)
+memory backed by [Perseus Vault](https://github.com/sowerkoku/Perseus-Continuum)
 — a single static binary (SQLite + FTS5 + bundled ONNX embeddings, optional
 AES-256-GCM), no external service, works offline.
 
@@ -28,7 +28,7 @@ pip install perseus-vault-pydantic-ai
 Plus the `perseus-vault` binary (single static file, no deps):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/bootstrap.sh | bash
 ```
 
 ## Usage

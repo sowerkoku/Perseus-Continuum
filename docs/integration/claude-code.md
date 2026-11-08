@@ -10,10 +10,10 @@ across coding sessions.
 
 ```bash
 # One-shot bootstrap (recommended)
-curl -sSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/bootstrap.sh | bash
 
 # Or build from source via cargo
-cargo install --git https://github.com/Perseus-Computing-LLC/perseus-vault
+cargo install --git https://github.com/sowerkoku/Perseus-Continuum
 ```
 
 Verify:

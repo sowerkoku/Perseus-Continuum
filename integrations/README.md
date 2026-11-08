@@ -48,5 +48,5 @@ The adapter pattern:
 All integrations require Perseus Vault v1.0.0+ installed:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Perseus-Computing-LLC/perseus-vault/main/scripts/bootstrap.sh | bash
+curl -sSL https://raw.githubusercontent.com/sowerkoku/Perseus-Continuum/main/scripts/bootstrap.sh | bash
 ```

@@ -1,6 +1,6 @@
 # Activation-Gated Sparse Writes
 
-Issue: [#874](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/874) — Activation-gated sparse writes: interference-aware memory updates.
+Issue: #874 — Activation-gated sparse writes: interference-aware memory updates.
 Schema: v34 (`write_quarantine`). Status: shipped (2026-08).
 
 ## Grounding

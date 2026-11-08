@@ -1,7 +1,7 @@
 # Memory-quality scorecard and release gate policy
 
-This policy implements [issue #779](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/779)
-and the bounded v0 evaluation slice in [issue #862](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/862).
+This policy implements issue #779
+and the bounded v0 evaluation slice in issue #862.
 The machine-readable report is produced by the existing
 `benchmark/quality/run.py`; the scorecard remains a separate blocking decision.
 

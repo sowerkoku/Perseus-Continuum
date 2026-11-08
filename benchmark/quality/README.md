@@ -1,7 +1,7 @@
 # Perseus Vault memory-quality benchmark
 
 This directory extends the issue #778/#779 benchmark with the bounded v0 slice
-for [issue #862](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/862).
+for issue #862.
 It remains the same manifest-driven MCP stdio harness; there is no parallel
 benchmark runner.
 

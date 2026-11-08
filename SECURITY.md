@@ -171,7 +171,7 @@ verify it was built by our release workflow from this repository:
 
 ```bash
 gh attestation verify perseus-vault-lite-x86_64-unknown-linux-musl.tar.gz \
-  --repo Perseus-Computing-LLC/perseus-vault
+  --repo sowerkoku/Perseus-Continuum
 ```
 
 A successful verification confirms the artifact's provenance (repo, workflow,

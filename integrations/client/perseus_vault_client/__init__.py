@@ -144,7 +144,7 @@ class VaultClient:
             raise VaultError(
                 f"Could not launch perseus-vault binary {self._binary!r}. "
                 "Install it (single static binary, no deps) from "
-                "https://github.com/Perseus-Computing-LLC/perseus-vault and put "
+                "https://github.com/sowerkoku/Perseus-Continuum and put "
                 "it on PATH or pass binary=/path/to/perseus-vault."
             ) from exc
         # Handshake.

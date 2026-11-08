@@ -125,12 +125,12 @@ dependency-aware execution recommendation, not a promise of dates. Linked issues
 authoritative acceptance criteria.
 
 **Live queue at refresh:** seven open issues and no open pull requests. The shipped prerequisites
-[#1132](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1132),
-[#1133](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1133),
-[#1134](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1134),
-[#1138](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1138),
-[#1141](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1141), and
-[#1142](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1142) are not re-queued.
+#1132,
+#1133,
+#1134,
+#1138,
+#1141, and
+#1142 are not re-queued.
 
 ### Registry count policy
 
@@ -149,21 +149,21 @@ A count mismatch blocks metadata publication; it does not change the capability 
 
 Use one implementation track and one measurement track:
 
-1. **Evidence substrate first:** [#1135 — governed derived and verbatim evidence lanes](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1135).
+1. **Evidence substrate first:** #1135 — governed derived and verbatim evidence lanes.
    Add the typed lane contract, source-group deduplication, temporal/scope/lifecycle governance,
    and hash-bound answer-facing receipt without changing default recall bytes.
-2. **Selection observability second:** [#1140 — bounded context-selection decisions](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1140).
+2. **Selection observability second:** #1140 — bounded context-selection decisions.
    Explain candidate dispositions, reason codes, budgets, and replay fingerprints over the stable
    evidence representation.
-3. **Graph validation third:** [#1143 — matched graph-context ablation](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1143).
+3. **Graph validation third:** #1143 — matched graph-context ablation.
    Compare graph-on/off under matched retrieval and context conditions; do not interpret an
    ablation before the selection/evidence receipt is inspectable.
-4. **Separate intervention track:** [#1136 — receipt-conditioned bucket intervention](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1136)
+4. **Separate intervention track:** #1136 — receipt-conditioned bucket intervention
    follows the existing evidence-ledger/replay contracts and should not be mixed into #1135.
 
-Keep [#1105](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1105) parked until the
-Amy/C3BM discussion, and keep [#1021](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1021)
-and [#1061](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1061) outside this
+Keep #1105 parked until the
+Amy/C3BM discussion, and keep #1021
+and #1061 outside this
 provider-free implementation wave unless their separate custody and spend gates are reopened.
 
 ### Execution chunks
@@ -184,7 +184,7 @@ registry number.
 
 #### Chunk 1 — governed derived and verbatim evidence (start here; provider-free)
 
-- **[#1135](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1135):** define typed
+- **#1135:** define typed
   `derived` and `verbatim` lanes, stable source-group identity, evidence/source-span resolution,
   temporal validity, workspace/agent visibility, stale/superseded/tombstone exclusion, and a
   bounded union path for answer assembly.
@@ -203,7 +203,7 @@ closed; the default path is byte-compatible.
 
 #### Chunk 2 — bounded context-selection decisions
 
-- **[#1140](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1140):** expose opt-in
+- **#1140:** expose opt-in
   candidate dispositions, reason codes, lane/source-group decisions, budgets, and replay
   fingerprints over #1135's evidence contract.
 
@@ -212,7 +212,7 @@ selection, budget truncation, and answer assembly without receiving raw prompts 
 
 #### Chunk 3 — matched graph-context diagnosis
 
-- **[#1143](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1143):** compare graph-on
+- **#1143:** compare graph-on
   and graph-off under the same retrieval mode, reader, context budget, and judge; report declared
   edge support, path attribution, evidence coverage, latency, and cost as separate dimensions.
 
@@ -221,7 +221,7 @@ presented as model-internal causality or as a third-party benchmark claim.
 
 #### Chunk 4 — controlled intervention
 
-- **[#1136](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1136):** seal the
+- **#1136:** seal the
   evidence/replay receipt before intervention, block re-entry through alternate lanes or fallbacks,
   and compare receipt, random, and matched-size controls.
 
@@ -232,13 +232,13 @@ frozen default and from efficacy claims.
 
 These remain visible but must not be pulled into the implementation wave:
 
-- **[#1105](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1105):** capture the
+- **#1105:** capture the
   resource-envelope contract now; implementation planning remains parked until the partner
   discussion on or after 2026-08-31.
-- **[#1061](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1061):** any RECON
+- **#1061:** any RECON
   recheck needs a frozen revision, resolved protocol discrepancies, cost/token guards, and fresh
   explicit authorization; it is not a positive efficacy verdict.
-- **[#1021](https://github.com/Perseus-Computing-LLC/perseus-vault/issues/1021):** retain the
+- **#1021:** retain the
   accepted frozen-default result as its own row and keep the residual runs/custody work separate
   from plain-prompt or experimental results.
 

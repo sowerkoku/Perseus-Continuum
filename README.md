@@ -1,7 +1,9 @@
 Based on 
 # Perseus Vault
 by Perseus-Computing-LLC
+
 ---
+
 > **Persistent, encrypted memory for AI agents. One Rust binary, one file, no cloud.**
 
 [![Build and Test](https://img.shields.io/github/actions/workflow/status/sowerkoku/Perseus-Continuum/test.yml)](https://github.com/sowerkoku/Perseus-Continuum/actions/workflows/test.yml)

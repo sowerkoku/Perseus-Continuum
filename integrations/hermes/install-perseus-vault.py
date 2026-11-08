@@ -161,6 +161,7 @@ import logging
 import os
 import re
 import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.request
@@ -2062,6 +2063,13 @@ class PerseusVaultProvider(MemoryProvider):
 
     _RECALL_PAGE = 50
     _RECALL_MAX_ITEMS = 1000
+    # Transient 'no_match' hardening (real-server E2E follow-up of
+    # 8bcb008): the server occasionally answers a ref-scoped listing
+    # with an empty 'no_match' diagnostic moments after a write while
+    # the identical query succeeds seconds later. Bounded, scoped
+    # re-reads only — never a global retry inside _recall_pages.
+    _NO_MATCH_RETRIES = 2          # at most two additional reads
+    _NO_MATCH_RETRY_DELAY = 1.0    # seconds between reads
 
     def _recall_pages(self, args_base: dict) -> Tuple[List[Any], str]:
         """Paginate a recall until a SHORT page. Returns
@@ -2111,11 +2119,7 @@ class PerseusVaultProvider(MemoryProvider):
             # proven, so it is non-processable (fail-closed).
             return [], "failed"
         out: List[Any] = []
-        raw, state = self._recall_pages(
-            {"query": "", "category": self._CHECKPOINT_CATEGORY,
-             "ref_type": "hermes_session",
-             "ref_value": self._session_label,
-             **self._ws_args()})   # F-B: read scope == write scope
+        raw, state = self._recall_pages(self._draft_listing_scope())
         if state != "complete":
             # R3 rule: an incomplete recovery (FAILED or TRUNCATED) is
             # never processed as if it were complete. on_session_end
@@ -2124,6 +2128,14 @@ class PerseusVaultProvider(MemoryProvider):
             logger.warning(
                 "perseus-vault: draft-checkpoint listing %s; "
                 "consumption cycle will be aborted", state.upper())
+        out.extend(self._parse_draft_items(raw))
+        return out, state
+
+    @staticmethod
+    def _parse_draft_items(raw: List[Any]) -> List[Any]:
+        """Shared parser for draft-listing pages (used by
+        _draft_checkpoints and the bounded no_match re-read)."""
+        out: List[Any] = []
         for h in raw:
             # F-A (live-server evidence 2026-11-07): agent-attributed
             # writes land in the server's 'proposed' lifecycle tier even
@@ -2143,7 +2155,51 @@ class PerseusVaultProvider(MemoryProvider):
                     continue
             if isinstance(body, dict) and body.get("evidence"):
                 out.append((h.get("key") or h.get("id") or "", body))
-        return out, state
+        return out
+
+    def _draft_listing_scope(self) -> Dict[str, Any]:
+        return {"query": "", "category": self._CHECKPOINT_CATEGORY,
+                "ref_type": "hermes_session",
+                "ref_value": self._session_label,
+                **self._ws_args()}   # F-B: read scope == write scope
+
+    def _probe_draft_listing(self) -> Tuple[List[Any], str, bool]:
+        """ONE bounded page of the draft-checkpoint listing; used as a
+        retry attempt only, never inside _recall_pages. Returns
+        (items, state, saw_no_match). saw_no_match is True ONLY when
+        the server itself served an empty page carrying
+        diagnostic.reason == 'no_match' — its explicit 'queried and
+        found nothing' signal. Transport/parse errors and any other
+        diagnostic return saw_no_match=False so the retry band never
+        covers them. This read never mutates vault state."""
+        if not self._session_label:
+            return [], "failed", False
+        a = self._draft_listing_scope()
+        a["limit"] = self._RECALL_PAGE
+        a["offset"] = 0
+        try:
+            res = self._client.call_tool("perseus_vault_recall", a,
+                                         timeout=10)
+        except Exception:
+            return [], "failed", False
+        if not isinstance(res, dict) or not res.get("ok"):
+            return [], "failed", False
+        d = res.get("data")
+        if not isinstance(d, dict):
+            try:
+                d = json.loads(res.get("text") or "{}")
+            except Exception:
+                return [], "failed", False
+        if not isinstance(d, dict):
+            return [], "failed", False
+        batch = self._recall_hits(res)
+        if batch:
+            state = "complete" if len(batch) < self._RECALL_PAGE else "truncated"
+            return self._parse_draft_items(batch), state, False
+        diag = d.get("diagnostic")
+        saw = bool(isinstance(diag, dict)
+                   and diag.get("reason") == "no_match")
+        return [], "complete", saw
 
     @staticmethod
     def _write_confirmed(res: dict) -> bool:
@@ -2179,7 +2235,13 @@ class PerseusVaultProvider(MemoryProvider):
         data = res.get("data") or {}
         if isinstance(data, list):
             return data
-        hits = data.get("results") or data.get("entities") or []
+        # 'items' is the real server's key (verified live 2026-11-08:
+        # structured content is {"items": [...], "total": N,
+        # "retrieval_profile": ...}); 'results'/'entities' kept for
+        # compatibility. Blindness to 'items' was the real cause of
+        # empty ref-scoped listings against the live server.
+        hits = (data.get("items") or data.get("results")
+                or data.get("entities") or [])
         return hits if isinstance(hits, list) else []
 
     def _consumed_checkpoint_keys(self) -> Tuple[Set[str], str]:
@@ -2334,6 +2396,30 @@ class PerseusVaultProvider(MemoryProvider):
                 "receipts=%s) — aborting consumption cycle; state "
                 "preserved for a later retry", ck_state, rc_state)
             return
+        # Transient 'no_match' band (authorized 2026-11-08): fires ONLY
+        # when ALL hold — the listing is empty, the server itself
+        # reported diagnostic 'no_match', ZERO receipts exist, and BOTH
+        # listings completed (FAILED/TRUNCATED aborted above; transport
+        # errors yield saw_no_match=False and never re-enter). At most
+        # two additional scoped reads, one second apart. Nothing is
+        # marked consumed by retries alone: the decision below is the
+        # same normal path; if every read stays empty the behavior is
+        # unchanged fail-closed (no capture, no receipts, no marking).
+        if not checkpoints and not already and self._session_label:
+            for attempt in range(self._NO_MATCH_RETRIES):
+                # one second between reads, including before the first
+                time.sleep(self._NO_MATCH_RETRY_DELAY)
+                found, probe_state, saw_no_match = self._probe_draft_listing()
+                logger.warning(
+                    "perseus-vault: empty+no_match checkpoint listing "
+                    "with zero receipts — scoped re-read %d/%d: %d found "
+                    "(state=%s)", attempt + 1, self._NO_MATCH_RETRIES,
+                    len(found), probe_state)
+                if found:
+                    checkpoints, ck_state = found, probe_state
+                    break
+                if probe_state != "complete" or not saw_no_match:
+                    break
         fresh = [(k, b) for (k, b) in checkpoints if k and k not in already]
         entries = []
         for t in self._turn_buffer:

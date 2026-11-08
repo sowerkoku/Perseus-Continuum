@@ -99,6 +99,10 @@ class FakeVault:
         # fail the Nth (0-based) recall call per category
         self.fail_recall_call_index = {}
         self.raise_recall_call_index = {}
+        # serve an EMPTY page carrying diagnostic.reason='no_match' for
+        # the Nth (0-based) recall call of a category (transient
+        # real-server behavior the bounded retry band must handle)
+        self.no_match_recall_index = {}
         self._recall_counts = {}
         # --- real-server semantics fidelity (F-A/F-B/F-C) ---
         self.server_tiers = False   # agent-attributed writes -> 'proposed'
@@ -172,6 +176,12 @@ class FakeVault:
                 return {"ok": False, "text": "read error", "data": None}
             if self.raise_recall_call_index.get(cat) == idx:
                 raise ConnectionError("connection reset")
+            if idx in (self.no_match_recall_index.get(cat) or ()):
+                payload = {"items": [], "total": 0,
+                           "diagnostic": {"reason": "no_match",
+                                          "hint": "no matches"}}
+                return {"ok": True, "text": json.dumps(payload),
+                        "data": payload}
             hits = []
             for (cat, key), ent in self.store.items():
                 if cat != a.get("category"):
@@ -1015,6 +1025,117 @@ def main():
         assert len(marks) >= 2, "marking must be retried after qrn"
         assert vault.store[("checkpoint", k)]["status"] == "deprecated"
     check("R qrn ids never durable: raise/unconfirmed/retry (F-C)", r_test)
+
+    # ---- S (transient no_match band): scoped bounded re-reads, max
+    #      two, only when empty+no_match+zero receipts+COMPLETE. ----
+    def ck_recalls(vault):
+        return [x for x in vault.calls if x[0] == "perseus_vault_recall"
+                and (x[1] or {}).get("category") == "checkpoint"]
+
+    def seed_receipt(vault, ck_key, gw):
+        vault.call_tool("perseus_vault_remember", {
+            "category": "hermes-capture-receipt",
+            "key": "rcpt-" + ck_key,
+            "body_json": json.dumps({"consumed_checkpoint": ck_key}),
+            "external_refs": [{"ref_type": "hermes_session",
+                               "ref_value": gw, "relationship":
+                               "mentions"}]})
+
+    def s_mk(gw):
+        vault = FakeVault()
+        p = make_provider(mod, session_label=gw)
+        p._client = vault
+        p._NO_MATCH_RETRY_DELAY = 0.01   # keep the suite fast
+        k = p.on_pre_compress([
+            {"role": "user", "content": gw + " pregunta"},
+            {"role": "assistant",
+             "content": "HECHO-" + gw + " regla transitoria"}]
+        ).split(": ", 1)[1]
+        return vault, p, k
+
+    def s1_test():
+        vault, p, k = s_mk("S1")
+        vault.no_match_recall_index = {"checkpoint": [0]}
+        p.on_session_end([])
+        assert vault.captured and "HECHO-S1" in vault.captured[-1], \
+            "second attempt must process normally"
+        assert vault.count("perseus_vault_capture") == 1
+        assert vault.store[("checkpoint", k)]["status"] == "deprecated"
+    check("S1 no_match then found on retry: processed normally", s1_test)
+
+    def s2_test():
+        vault, p, k = s_mk("S2")
+        vault.no_match_recall_index = {"checkpoint": [0, 1]}
+        p.on_session_end([])
+        assert vault.captured and "HECHO-S2" in vault.captured[-1], \
+            "third attempt (max two retries) must process normally"
+        assert vault.store[("checkpoint", k)]["status"] == "deprecated"
+        assert len(ck_recalls(vault)) == 3  # 1 list + 2 retries, no more
+    check("S2 two no_match then found: processed; retries bounded", s2_test)
+
+    def s3_test():
+        vault, p, k = s_mk("S3")
+        vault.no_match_recall_index = {"checkpoint": [0, 1, 2, 3]}
+        p.on_session_end([])
+        assert not vault.captured, "all-empty must never distill"
+        assert vault.count("perseus_vault_capture") == 0
+        assert vault.store[("checkpoint", k)]["status"] == "draft", \
+            "retries alone never consume a checkpoint"
+        assert len(ck_recalls(vault)) == 3  # bounded at two retries
+        marks = [a for (n, a) in vault.calls
+                 if n == "perseus_vault_remember"
+                 and a.get("status") == "deprecated"]
+        assert not marks, "all-empty must never mark"
+    check("S3 all no_match: fail-closed; no mark, no distill", s3_test)
+
+    def s4_test():
+        vault, p, k = s_mk("gw-S4")
+        seed_receipt(vault, k, "gw-S4")
+        vault.no_match_recall_index = {"checkpoint": [0]}
+        p.on_session_end([])
+        assert len(ck_recalls(vault)) == 1, \
+            "with receipts the retry band must not fire"
+        assert not vault.captured
+    check("S4 receipts present: band does not activate", s4_test)
+
+    def s5_test():
+        vault, p, k = s_mk("S5")
+        vault.raise_recall_call_index = {"checkpoint": 0}
+        p.on_session_end([])
+        assert len(ck_recalls(vault)) == 1, \
+            "transport errors must not trigger the band"
+        assert not vault.captured
+        assert vault.store[("checkpoint", k)]["status"] == "draft"
+    check("S5 transport error: band does not activate", s5_test)
+
+    def s6_test():
+        vault, p, k = s_mk("gw-S6")
+        k2 = p.on_pre_compress([
+            {"role": "user", "content": "s6b"},
+            {"role": "assistant", "content": "HECHO-S6 extra"}]
+        ).split(": ", 1)[1]
+        k3 = p.on_pre_compress([
+            {"role": "user", "content": "s6c"},
+            {"role": "assistant", "content": "HECHO-S6 third"}]
+        ).split(": ", 1)[1]
+        p._RECALL_PAGE = 2
+        p._RECALL_MAX_ITEMS = 2      # cap below the 3 stored rows:
+        p.on_session_end([])         # page1 full -> cap -> TRUNCATED
+        assert len(ck_recalls(vault)) == 1, \
+            "TRUNCATED must stop at the cap, never add band reads"
+        assert not vault.captured
+    check("S6 TRUNCATED: band does not activate", s6_test)
+
+    def s7_test():
+        vault, p, k = s_mk("gw-S7")
+        seed_receipt(vault, k, "gw-S7")
+        p.on_session_end([])          # replay: receipt already confirmed
+        assert vault.count("perseus_vault_capture") == 0, \
+            "confirmed receipt must gate re-distillation"
+        assert len(ck_recalls(vault)) == 1
+        p.on_session_end([])          # further replay: still nothing
+        assert vault.count("perseus_vault_capture") == 0
+    check("S7 confirmed receipt: no re-distillation, band idle", s7_test)
 
     # ---- M (R3 tri-state): the defensive cap yields TRUNCATED, which
     #      must be treated as failure: cycle aborts, nothing consumed.

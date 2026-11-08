@@ -176,6 +176,20 @@ Consumption guarantees (audit R1–R4, tests G–L, M–O):
   across consecutive full passes over an unchanged set (order is not
   guaranteed under concurrent writes — inherent to offset paging;
   cycle windows are seconds and the cycle aborts on any failed page).
+Transient empty-listing hardening (2026-11-08, authorized): the real
+server occasionally answers a ref-scoped listing with an empty page
+carrying diagnostic.reason='no_match' moments after a write. The
+session-end flow now performs a bounded band: at most TWO additional
+scoped reads of the checkpoint listing, one second apart, fired ONLY
+when all four hold simultaneously — listing empty, server itself
+reported 'no_match', ZERO receipts, both listings COMPLETE. Never for
+transport errors, FAILED or TRUNCATED; never inside _recall_pages;
+retries alone never mark anything consumed; if every read stays empty
+the behavior remains exactly fail-closed (tests S1–S7). Related root
+cause fixed the same day: _recall_hits was blind to the server's
+'items' result key (it only mapped 'results'/'entities'), making every
+real-server ref-scoped listing read empty (S suite + live E2E proved
+the corrected key).
 Real-server lifecycle compatibility (audit round F, 2026-11-07):
 - F-A: the real server stores AGENT-ATTRIBUTED writes (any remember
   carrying agent_id) in the 'proposed' lifecycle tier regardless of

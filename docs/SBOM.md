@@ -14,7 +14,6 @@
 | Field | Value |
 |---|---|
 | Supplier | Perseus Computing LLC |
-| Supplier Contact | perseus@perseus.observer |
 | SBOM Author | Perseus Computing LLC |
 | Timestamp | 2026-06-20T14:08:00-05:00 |
 | SBOM Format | NTIA Minimum Elements + SPDX Lite |

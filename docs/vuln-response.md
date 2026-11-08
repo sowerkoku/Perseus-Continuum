@@ -17,7 +17,7 @@ lives in.*
 
 | Role | Who | Responsibility |
 |---|---|---|
-| **Security Lead** | Thomas Connally (perseus@perseus.observer) | Owns the report end-to-end: acknowledgment, triage, fix coordination, disclosure. |
+| **Security Lead** | Thomas Connally | Owns the report end-to-end: acknowledgment, triage, fix coordination, disclosure. |
 | **Backup handler** | Mark Thrailkill (mark@perseus.observer) | Covers acknowledgment and triage when the Security Lead is unavailable (OOO, >24h). |
 
 At least one handler monitors the intake channels every business day. If the
@@ -25,8 +25,7 @@ primary is unreachable within the acknowledgment window, the backup takes over.
 
 ## 2. Intake channels
 
-1. **Email** — `perseus@perseus.observer` (published in `SECURITY.md`).
-2. **GitHub Private Vulnerability Reporting** — enabled on the repo; reports
+1. **GitHub Private Vulnerability Reporting** — enabled on the repo; reports
    arrive as private security advisories.
 
 Reports through any other channel (public issue, social, etc.) are moved to a

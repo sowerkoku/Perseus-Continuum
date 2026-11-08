@@ -66,7 +66,7 @@ Tested and confirmed working with:
 - [Claude Desktop](https://claude.ai/download) — [config guide](https://github.com/sowerkoku/Perseus-Continuum/blob/main/docs/integration/claude-code.md)
 - [Cursor](https://cursor.com) — [config guide](https://github.com/sowerkoku/Perseus-Continuum/blob/main/docs/integration/cursor.md)
 - [Hermes Agent](https://github.com/nousresearch/hermes-agent)
-- [Perseus](https://perseus.observer) — native integration
+- Perseus — native integration
 - [OpenClaw](https://openclaw.ai)
 - Any host supporting MCP JSON-RPC 2.0 stdio
 

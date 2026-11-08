@@ -215,6 +215,5 @@ perseus-vault --db ~/.openclaw/perseus-vault/perseus-vault.db --vault-export ~/p
 ## Links
 
 - GitHub: https://github.com/sowerkoku/Perseus-Continuum
-- Website: https://perseus.observer/perseus-vault
 - Smithery: https://smithery.ai/server/perseus-vault
 - mcpservers.org: https://mcpservers.org/servers/perseus-computing-llc/perseus-vault

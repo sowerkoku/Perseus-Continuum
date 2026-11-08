@@ -1,6 +1,6 @@
 # Statement of Work — Cryptographic Review: Perseus Vault audit-chain (keyed-MAC + payload commitment)
 
-**Requestor:** Perseus Computing LLC — perseus@perseus.observer
+**Requestor:** Perseus Computing LLC
 **Project:** Perseus Vault (open-source, MIT) — MCP-native local-first memory engine for AI agents
 **Repo:** https://github.com/sowerkoku/Perseus-Continuum (Rust)
 **Date:** 2026-07-05  **Prepared for:** OSTIF intake / crypto-audit firm quote

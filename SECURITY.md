@@ -10,9 +10,8 @@
 
 ## Reporting a Vulnerability
 
-**Do not open a public issue.** Email security disclosures to:
-
-**perseus@perseus.observer**
+**Do not open a public issue.** Report security disclosures via GitHub Private
+Vulnerability Reporting on this repository (private security advisory).
 
 You will receive a response within 48 hours. Perseus Computing LLC is a US-owned
 small business and treats security reports as confidential until a fix is published.
@@ -181,7 +180,7 @@ commit) and that it has not been tampered with since it was built.
 
 ## Contact
 
-Security: **perseus@perseus.observer**
+Use GitHub Private Vulnerability Reporting (see above).
 
 **PGP** — encrypt sensitive reports to our security key:
 
@@ -189,6 +188,6 @@ Security: **perseus@perseus.observer**
 Fingerprint: 92C8 E815 1A60 DB38 46DB  420B 029A 35A6 A22B 287E
 ```
 
-Fetch it from [keys.openpgp.org](https://keys.openpgp.org/search?q=perseus@perseus.observer)
+Fetch it from keys.openpgp.org
 (`gpg --keyserver hkps://keys.openpgp.org --recv-keys 92C8E8151A60DB3846DB420B029A35A6A22B287E`)
 and verify the fingerprint above before use.

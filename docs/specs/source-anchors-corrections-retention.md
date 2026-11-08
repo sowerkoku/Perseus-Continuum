@@ -43,7 +43,7 @@ Canonical forms and examples:
 | `pull_request` | `host:owner/name#N` | `github:Perseus-Computing-LLC/perseus-vault#727` |
 | `file` | absolute path, workspace-relative if portable | `/opt/data/config.yaml` |
 | `session` | agent session identifier | `hermes:default:3cdf09c0a464` |
-| `url` | full URL, scheme required | `https://status.perseus.observer/…` |
+| `url` | full URL, scheme required | `https://example.com/…` |
 
 Rules:
 

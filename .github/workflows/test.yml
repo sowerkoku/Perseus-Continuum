@@ -106,8 +106,10 @@ jobs:
   test-macos:
     # Pin away from macos-latest: the current Xcode image can expose a newer
     # precompiled ort-sys cache layout without libonnxruntime, failing before
-    # project compilation. macos-14 is the stable Apple-Silicon lane.
-    runs-on: macos-14
+    # project compilation. macos-14 retired on the runner fleet ("configuration
+    # 'macos-14-arm64-us-default' is not supported", 2026-11-08); macos-15 is
+    # the current stable Apple-Silicon lane.
+    runs-on: macos-15
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

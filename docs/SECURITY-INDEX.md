@@ -48,7 +48,7 @@ access can be reviewed and revoked. No keys or tokens appear here.
 | Release / publish (crates.io, GHCR, MCP registry) | `[CONFIRM token holder(s)]` | Publishing credentials held out-of-band, not in repo |
 | Release signing / provenance | *none yet* | Signed releases + SLSA provenance are a tracked milestone (§ SECURITY-MILESTONES) |
 | Security disclosure — primary handler | Thomas Connally | See [`vuln-response.md`](./vuln-response.md) |
-| Security disclosure — backup handler | Mark Thrailkill (mark@perseus.observer) | Covers when primary is unavailable |
+| Security disclosure — backup handler | Mark Thrailkill | Covers when primary is unavailable |
 
 > **Review cadence:** revisit this register whenever a team member joins/leaves,
 > a new publishing target is added, or a signing key is created. Update the

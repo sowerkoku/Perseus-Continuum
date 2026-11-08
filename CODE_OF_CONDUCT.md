@@ -38,8 +38,8 @@ response to any behavior that they deem inappropriate, threatening, offensive,
 or harmful.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-**conduct@perseus.observer**. All complaints will be reviewed and investigated
+reported to the maintainers of this repository via GitHub
+([github.com/sowerkoku](https://github.com/sowerkoku)). All complaints will be reviewed and investigated
 promptly and fairly.
 
 ## Attribution

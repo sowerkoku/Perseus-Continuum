@@ -1,4 +1,4 @@
-Based on **Perseus Vault** by Perseus-Computing-LLC (_discontinued project (removed from GitHub)_)
+Based on **Perseus Vault** by Perseus-Computing-LLC (_discontinued project (removed from GitHub_)
 
 ---
 

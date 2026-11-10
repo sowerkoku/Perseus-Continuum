@@ -561,7 +561,7 @@ def main():
             p2 = mod.PerseusVaultProvider()
             p2._load_config = lambda: p2._config.update(
                 {"api_key": "tok", "url": "http://fake"})
-            p2.initialize("20261107proc2",
+            p2.initialize("20261107proc2", hermes_home="/tmp/pv-test-f-home",
                           gateway_session_key="gw-R", resumed=True)
             assert p2._enabled and p2._resumed
             assert p2._session_label == "gw-R", \
@@ -589,7 +589,8 @@ def main():
             p3 = mod.PerseusVaultProvider()
             p3._load_config = lambda: p3._config.update(
                 {"api_key": "tok", "url": "http://fake"})
-            p3.initialize("20261107proc3", gateway_session_key="gw-R", resumed=True)
+            p3.initialize("20261107proc3", hermes_home="/tmp/pv-test-f-home",
+                          gateway_session_key="gw-R", resumed=True)
             p3._client = vault
             p3.on_session_end([])
             assert vault.count("perseus_vault_capture") == 1, \

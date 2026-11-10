@@ -152,7 +152,7 @@ def register(ctx):
 __all__ = ["PerseusVaultProvider", "create_provider", "register"]
 '''
 
-PROVIDER_PY = r'''"""Perseus Vault Memory Provider for Hermes Agent (v0.2.0).
+PROVIDER_PY = r'''"""Perseus Vault Memory Provider for Hermes Agent.
 
 Native MemoryProvider implementation backed by the Perseus Vault MCP HTTP
 endpoint. Key properties (see integrations/hermes/README.md):
@@ -176,6 +176,12 @@ endpoint. Key properties (see integrations/hermes/README.md):
   MCP_PERSEUS_VAULT_API_KEY / MCP_HOST_PORT) -> config.yaml
   memory.perseus-vault: -> $HERMES_HOME/perseus-vault.json -> defaults.
 - sync_turn() is non-blocking (local buffer, flushed at session end).
+- Host contracts (Hermes v0.23.1): every background job goes through
+  agent.memory_provider.spawn_context_thread (profile contextvars must
+  travel with the thread), and every per-profile path binds from the
+  hermes_home kwarg of initialize(). No version-conditional branches or
+  fallbacks: hosts without these APIs must satisfy them before install
+  (installer gate belongs to the release process, see README).
 - Session end runs a SCOPED capture (primary agent contexts only), not a
   global consolidate.
 - workspace_hash is config-driven and only sent when set (blank = global).
@@ -196,7 +202,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from agent.memory_provider import MemoryProvider
+from agent.memory_provider import MemoryProvider, spawn_context_thread
 
 logger = logging.getLogger(__name__)
 
@@ -1781,13 +1787,17 @@ class PerseusVaultProvider(MemoryProvider):
         except Exception:
             return {}
 
-    @staticmethod
-    def _json_config() -> Dict[str, str]:
-        try:
-            from hermes_constants import get_hermes_home
-            home = get_hermes_home()
-        except Exception:
-            home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    def _json_config(self) -> Dict[str, str]:
+        # Bound at initialize() when present. The ambient resolution below is
+        # reachable ONLY pre-initialize (is_available); never from worker
+        # threads or after activation.
+        home = getattr(self, "_hermes_home", None)
+        if home is None:
+            try:
+                from hermes_constants import get_hermes_home
+                home = get_hermes_home()
+            except Exception:
+                home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
         path = Path(home) / "perseus-vault.json"
         try:
             data = json.loads(path.read_text())
@@ -1827,6 +1837,10 @@ class PerseusVaultProvider(MemoryProvider):
         return bool(self._config.get("url") and self._config.get("api_key"))
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        # Profile binding (Hermes storage-path contract): every per-profile
+        # path used after this point derives from the hermes_home kwarg.
+        # A missing kwarg is a host-contract violation: fail closed.
+        self._hermes_home = Path(kwargs["hermes_home"])
         self._session_id = session_id
         self._agent_context = kwargs.get("agent_context", "primary")
         self._agent_label = (kwargs.get("agent_id")
@@ -1895,8 +1909,12 @@ class PerseusVaultProvider(MemoryProvider):
             with self._prefetch_lock:
                 self._prefetched = block
 
-        threading.Thread(target=_work, daemon=True,
-                         name="perseus-vault-prefetch").start()
+        # Host threading contract (v0.23.1): every memory-provider background
+        # job goes through spawn_context_thread so the owning profile's
+        # contextvars (HERMES_HOME scope, secrets) travel with the thread.
+        # No bare-thread fallback exists by design; incompatible hosts are
+        # stopped by the installer gate, not by degrading here.
+        spawn_context_thread(_work, name="perseus-vault-prefetch").start()
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Return recalled context; Hermes injects non-empty results."""

@@ -337,13 +337,88 @@ def c6():
 # C7 — semantic equivalence vs the a9a2c2b baseline (non-modified routes)
 # --------------------------------------------------------------------------
 
-def _scenario(mod, inject_error=False):
-    """Scripted session: 2 turns, checkpoint, session-end. Returns the exact
-    normalized call trace and observable results."""
-    if inject_error:
-        client = base.FakeClient(default_ok=False)
+class StageFail:
+    """Stage-aware failure injector over FakeVault.
+
+    Intercepts exactly one kind of call and returns a failure or
+    quarantine-shaped response WITHOUT mutating vault state (real server:
+    a rejected write leaves no entity; a qrn write is never served).
+    Intercepted calls are recorded in the delegate's trace because the
+    provider did make them.
+    Stages: ckpt-write | recall-ckpt | recall-receipts | capture |
+            receipt-write | marking.   Shapes: error | qrn.
+    """
+
+    def __init__(self, delegate, stage, shape):
+        self.d = delegate
+        self.stage = stage
+        self.shape = shape
+        self._fired = False
+
+    def _resp(self):
+        if self.shape == "qrn":
+            payload = {"ok": True, "action": "quarantined",
+                       "id": "qrn-fixed0000000"}
+            return {"ok": True, "text": json.dumps(payload), "data": payload}
+        return {"ok": False, "text": "stage-rejected", "data": None}
+
+    def _matches(self, name, a):
+        if self._fired:
+            return False
+        if self.stage == "ckpt-write":
+            return (name == "perseus_vault_remember"
+                    and a.get("category") == "checkpoint"
+                    and a.get("status") == "draft")
+        if self.stage == "marking":
+            return (name == "perseus_vault_remember"
+                    and a.get("category") == "checkpoint"
+                    and a.get("status") == "deprecated")
+        if self.stage == "receipt-write":
+            return (name == "perseus_vault_remember"
+                    and a.get("category") == "hermes-capture-receipt")
+        if self.stage == "capture":
+            return name == "perseus_vault_capture"
+        if self.stage == "recall-ckpt":
+            return (name == "perseus_vault_recall"
+                    and a.get("category") == "checkpoint")
+        if self.stage == "recall-receipts":
+            return (name == "perseus_vault_recall"
+                    and a.get("category") == "hermes-capture-receipt")
+        return False
+
+    @property
+    def calls(self):
+        return self.d.calls
+
+    def call_tool(self, name, arguments=None, timeout=30.0):
+        a = dict(arguments or {})
+        if self._matches(name, a):
+            self._fired = True
+            self.d.calls.append((name, a))
+            return self._resp()
+        return self.d.call_tool(name, a, timeout)
+
+
+def _final_state(vault):
+    ck = {}
+    for (cat, key), v in vault.store.items():
+        if cat == "checkpoint":
+            ck[key] = v["status"]
+    receipts = sorted(k for (cat, k) in vault.store
+                      if cat == "hermes-capture-receipt")
+    return {"checkpoints": ck, "receipts": receipts,
+            "captures": len(vault.captured)}
+
+
+def _scenario(mod, case):
+    """case: dict(stage=None|str, shape=None). Returns trace, results and
+    final observable state (checkpoints consumed/draft, receipts present)."""
+    if case["stage"] is None:
+        client = base.FakeClient(default_ok=False)  # generic-failure extra
+        vault = None
     else:
-        client = base.FakeVault()
+        vault = base.FakeVault()
+        client = StageFail(vault, case["stage"], case["shape"])
     p = make_ready(mod, session_id="sess-parity", hermes_home="/tmp/parity",
                    gsk="gw-parity", client=client)
     p.sync_turn("u1: confirmar respaldo nightly", "a1: respaldo ok",
@@ -362,16 +437,34 @@ def _scenario(mod, inject_error=False):
         raised = raised or type(e).__name__
     trace = [(n, json.dumps(a, sort_keys=True, ensure_ascii=False))
              for (n, a) in client.calls]
-    return trace, (res, raised)
+    state = _final_state(vault) if vault is not None else None
+    return trace, (res, raised), state
+
+
+# Failure matrix required by review 2026-11-10: independent failure at each
+# stage of the persistence cycle, plus observable final state. The generic
+# all-fail client is kept as an additional case.
+C7_MATRIX = [
+    {"stage": "ckpt-write", "shape": "error"},
+    {"stage": "recall-ckpt", "shape": "error"},
+    {"stage": "capture", "shape": "error"},
+    {"stage": "receipt-write", "shape": "error"},
+    {"stage": "receipt-write", "shape": "qrn"},
+    {"stage": "marking", "shape": "error"},
+    {"stage": "marking", "shape": "qrn"},
+    {"stage": "recall-receipts", "shape": "error"},
+    {"stage": None, "shape": None},  # generic-failure (additional)
+]
 
 
 def c7(new_mod, old_mod):
     problems = []
-    for inject in (False, True):
-        t_new, r_new = _scenario(new_mod, inject)
-        t_old, r_old = _scenario(old_mod, inject)
+    detected_something = False  # anti-false-positive sentinel
+    for case in C7_MATRIX:
+        t_new, r_new, s_new = _scenario(new_mod, case)
+        t_old, r_old, s_old = _scenario(old_mod, case)
+        label = f"{case['stage']}/{case['shape']}"
         if t_new != t_old:
-            # precise diff for the report
             detail = []
             for i in range(max(len(t_new), len(t_old))):
                 a = t_new[i] if i < len(t_new) else None
@@ -380,13 +473,29 @@ def c7(new_mod, old_mod):
                     detail.append(f"pos {i}: new={a} old={b}")
                     if len(detail) >= 3:
                         break
-            problems.append(f"trace mismatch (inject_error={inject}): "
-                            + "; ".join(detail))
+            problems.append(f"trace mismatch [{label}]: " + "; ".join(detail))
         if r_new != r_old:
-            problems.append(f"result/behavior mismatch (inject_error={inject}): "
+            problems.append(f"result/behavior mismatch [{label}]: "
                             f"new={r_new} old={r_old}")
+        if s_new is not None and s_new != s_old:
+            problems.append(f"final-state mismatch [{label}]: "
+                            f"new={s_new} old={s_old}")
+        # the scenario must have actually exercised something (no empty
+        # vacuous comparisons): at least a checkpoint write call happened
+        if not t_new:
+            problems.append(f"[{label}] empty trace (scenario did not run)")
+        # non-vacuity: the comparison must have actually exercised real
+        # behavior (a real store populated, or a raise somewhere)
+        if r_new[1]:
+            detected_something = True
+        if s_new and (s_new["checkpoints"] or s_new["receipts"]
+                      or s_new["captures"]):
+            detected_something = True
     if problems:
-        return False, " | ".join(problems)
+        return False, " | ".join(problems)[:900]
+    if not detected_something:
+        return False, "matrix never observed a failing/partial outcome " \
+                      "(sentinel: comparisons may be vacuous)"
     return True, ""
 
 

@@ -7,7 +7,6 @@
 > **Origin:** The native Hermes MemoryProvider integration was originally
 > contributed by [sowerkoku](https://github.com/sowerkoku) in
 > #908;
-> the integration is maintained by Perseus Computing.
 
 ## Repository Structure
 

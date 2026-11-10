@@ -7,6 +7,16 @@
 > **Origin:** The native Hermes MemoryProvider integration was originally
 > contributed by [sowerkoku](https://github.com/sowerkoku) in
 > #908;
+>
+> **Plugin version:** `0.3.0` (declared in the shipped `plugin.yaml` and in
+> the installer constants).
+> **Hermes support for this 0.3.0 line:** documented floor ≥ 0.20.0;
+> empirically verified on v0.21.5+14471 and v0.23.1. **Not verified beyond
+> v0.23.1 — treat v0.23.1 as the supported ceiling of this line.**
+> **The next line (≥ 0.4.0) is independent and NOT backward compatible:**
+> it will target Hermes **v0.23.1 exclusively**, with the installer gating
+> the host version and critical APIs *before* writing any file. Widening
+> support requires an explicit contract review against the newer host.
 
 ## Repository Structure
 
@@ -142,7 +152,9 @@ docs, "Pre-Compress Checkpoints (fail-closed)". The provider declares
   have not yet written receipts. Mitigation for the carve-outs is
   their end-of-life position (no active turn), not a mechanism.
   The worker serialization is an implementation contract, not
-  official docs — re-verify on any Hermes upgrade.
+  official docs — re-verify on any Hermes upgrade. (Re-verified
+  UNCHANGED on v0.23.1, 2026-11-10: `_submit_background` still a
+  single `mem-sync` worker, `memory_manager.py:506`.)
 
 Consumption guarantees (audit R1–R4, tests G–L, M–O):
 - R1 partial capture: if assembled evidence exceeds the capture budget,
@@ -381,12 +393,27 @@ session-end capture):
 30 3 * * 0  perseus-vault maintain --db /abs/path/perseus-vault.db --vacuum
 ```
 
-## Requirements
+## Requirements (published line: plugin 0.3.0)
 
 - **Hermes Agent** ≥ 0.20.0 (native plugin support; `prefetch` injection,
   `on_turn_start`, `on_delegation`, `backup_paths` hooks)
 - **Perseus Vault MCP Server** ≥ 2.23.1 running at `host:port`
 - **Python** 3.10+ (for installer)
+
+**Verified range for 0.3.0 (evidence-based):** v0.21.5+14471 (2026-11-07/08,
+single production host) and v0.23.1 (2026-11-10, both production hosts).
+**Not verified beyond v0.23.1.** Any newer Hermes requires an explicit
+re-review of the contracts documented in this README before use.
+
+**Next line (≥ 0.4.0) — independent, not retro-compatible:**
+- Target: Hermes **v0.23.1 exclusively** — no fallbacks for older APIs,
+  no version-conditional code, no compatibility matrix.
+- Its installer verifies the host version and the presence of the critical
+  APIs (`spawn_context_thread`, `on_session_switch` with `reset`/`rewound`,
+  plugin-dir `config_schema.py` loading) **before writing any file**, and
+  aborts with zero filesystem changes on incompatibility.
+- Future Hermes updates: the supported version widens only after an
+  explicit contract review against the host's exact code.
 
 ## Plugin Files
 

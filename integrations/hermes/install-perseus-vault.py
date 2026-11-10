@@ -20,6 +20,13 @@ What the installer does:
   4. Writes non-secret config to $HERMES_HOME/perseus-vault.json (mode 600)
   5. `hermes config set memory.provider perseus-vault`
   6. Verifies with `hermes memory status`
+
+Versioned line (contract with users — see integrations/hermes/README.md):
+  Plugin: 0.3.0. Supported Hermes: >= 0.20.0 documented floor; VERIFIED
+  through v0.23.1 only, which is the ceiling of this line. The next line
+  (>= 0.4.0) is independent and NOT retro-compatible: it targets Hermes
+  v0.23.1 exclusively and gates the host version and critical APIs before
+  writing any file. Widening support requires an explicit contract review.
 """
 
 import json
@@ -94,6 +101,27 @@ def prompt_required(prompt: str) -> str:
 def get_hermes_home() -> Path:
     """Get Hermes home directory."""
     return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+
+
+# ===========================================================================
+# Version support declaration (line 0.3.0). These constants are a contract
+# with users: changing any value requires re-reviewing the documented
+# contracts in integrations/hermes/README.md against the host's exact code.
+# The next line (0.4.x) is independent and NOT retro-compatible: it will
+# target Hermes v0.23.1 exclusively, with a hard pre-write gate.
+# ===========================================================================
+
+PLUGIN_VERSION = "0.3.0"            # must match the embedded PLUGIN_YAML below
+SUPPORTED_HERMES_MIN = "0.20.0"    # documented floor of the 0.3.0 line
+VERIFIED_HERMES_CEILING = "0.23.1" # highest Hermes version verified for this line
+
+
+def plugin_yaml_version() -> str:
+    """Version declared by the embedded plugin.yaml (consistency check)."""
+    for line in PLUGIN_YAML.splitlines():
+        if line.startswith("version:"):
+            return line.split(":", 1)[1].strip().strip('"').strip("'")
+    return ""
 
 
 # ===========================================================================
@@ -3083,6 +3111,18 @@ def main() -> int:
                   "https://hermes-agent.nousresearch.com")
         return 1
     log_ok(f"Hermes found: {hermes_version}")
+
+    # Line declaration (contract with users; see integrations/hermes/README.md)
+    log_info(f"Plugin line: perseus-vault {PLUGIN_VERSION} — supported "
+             f"Hermes >= {SUPPORTED_HERMES_MIN} (documented floor), "
+             f"verified through {VERIFIED_HERMES_CEILING}. The 0.4.x line "
+             f"is independent and NOT retro-compatible (v0.23.1 only).")
+    declared = plugin_yaml_version()
+    if declared != PLUGIN_VERSION:
+        log_error(f"Internal inconsistency: embedded plugin.yaml declares "
+                  f"{declared!r}, installer declares {PLUGIN_VERSION!r}. "
+                  "Aborting without changes.")
+        return 1
 
     hermes_home = get_hermes_home()
     log_info(f"Hermes home: {hermes_home}")

@@ -106,6 +106,11 @@ def e1(installer_mod):
             problems.append("workspace changed without being provided")
         if not list(cfg.parent.glob("perseus-vault.json.bak-*")):
             problems.append("no backup of previous file")
+        else:
+            bak = list(cfg.parent.glob("perseus-vault.json.bak-*"))[0]
+            if oct(bak.stat().st_mode)[-3:] != "600":
+                problems.append(f"backup mode {oct(bak.stat().st_mode)} "
+                                "(must be 600: it may hold legacy api_key)")
         if oct(cfg.stat().st_mode)[-3:] != "600":
             problems.append(f"mode {oct(cfg.stat().st_mode)}")
         # second run with workspace provided: explicit update wins
@@ -183,27 +188,37 @@ def e2(provider_mod):
         if on_disk.get("api_key") != "[REDACTED-legacy]":
             problems.append("(c) legacy api_key dropped on empty values")
 
-        # (d) write failure: raise explicitly, original file intact,
-        # message free of secrets.
-        ro_dir = Path(td) / "ro"
-        ro_dir.mkdir()
-        (ro_dir / "perseus-vault.json").write_text(
-            json.dumps({"url": "http://keep", "api_key": "[REDACTED-legacy]"}))
-        before = (ro_dir / "perseus-vault.json").read_text()
-        ro_dir.chmod(0o500)
-        raised = None
+        # (d) write failure: DETERMINISTIC injection (a chmod-based test
+        # is not reliable under root). Force os.replace to fail and
+        # verify: explicit RuntimeError, original intact, no silent
+        # success, no secret in the message, temp file cleaned up.
+        det = Path(td) / "detfail"
+        det.mkdir()
+        det_cfg = det / "perseus-vault.json"
+        det_cfg.write_text(json.dumps(
+            {"url": "http://keep", "api_key": "[REDACTED-legacy]"}))
+        before = det_cfg.read_text()
+        real_replace = provider_mod.os.replace
+
+        def _boom(*a, **k):
+            raise PermissionError("injected replace failure")
+        provider_mod.os.replace = _boom
         try:
-            p.save_config({"url": "http://fail"}, str(ro_dir))
-        except RuntimeError as e:
-            raised = str(e)
-        ro_dir.chmod(0o700)
+            raised = None
+            try:
+                p.save_config({"url": "http://fail"}, str(det))
+            except RuntimeError as e:
+                raised = str(e)
+        finally:
+            provider_mod.os.replace = real_replace
         if raised is None:
-            problems.append("(d) unwritable config returned silent success")
-        else:
-            if "REDACTED-legacy" in raised or "SECRET" in raised:
-                problems.append("(d) error message leaked a secret")
-        if (ro_dir / "perseus-vault.json").read_text() != before:
+            problems.append("(d) injected failure returned silent success")
+        elif "REDACTED-legacy" in raised or "SECRET" in raised:
+            problems.append("(d) error message leaked a secret")
+        if det_cfg.read_text() != before:
             problems.append("(d) failed write damaged the original file")
+        if (det / "perseus-vault.json.tmp").exists():
+            problems.append("(d) temp file left behind after failure")
 
         # (e) corrupt existing file: refuse to rewrite, explicit error,
         # bytes preserved (no alternative write).
@@ -219,6 +234,24 @@ def e2(provider_mod):
             problems.append("(e) corrupt file silently rewritten")
         if (bad / "perseus-vault.json").read_text() != "{not json":
             problems.append("(e) corrupt file bytes changed")
+
+        # (f) valid JSON with a non-object root: same preservation
+        # contract as corrupt content (review 2026-11-10).
+        for label, bad_root in (("list", "[]"), ("null", "null"),
+                                ("scalar", "42")):
+            d = Path(td) / ("root-" + label)
+            d.mkdir()
+            f = d / "perseus-vault.json"
+            f.write_text(bad_root)
+            raised3 = None
+            try:
+                p.save_config({"url": "http://x"}, str(d))
+            except RuntimeError:
+                raised3 = True
+            if raised3 is None:
+                problems.append(f"(f) {label} root silently rewritten")
+            if f.read_text() != bad_root:
+                problems.append(f"(f) {label} root bytes changed")
     if problems:
         return False, "; ".join(problems)
     return True, ""

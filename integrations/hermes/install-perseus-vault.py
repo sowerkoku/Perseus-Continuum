@@ -2766,14 +2766,19 @@ class PerseusVaultProvider(MemoryProvider):
         if path.exists():
             try:
                 loaded = json.loads(path.read_text())
-                if isinstance(loaded, dict):
-                    data = loaded
             except Exception as e:
                 # corrupt existing file: refuse to rewrite over it
                 raise RuntimeError(
                     "perseus-vault: existing perseus-vault.json is "
                     f"unreadable ({e.__class__.__name__}); refusing to "
                     "rewrite it") from e
+            if not isinstance(loaded, dict):
+                # valid JSON but wrong root type (list/null/scalar): same
+                # contract as corrupt content - preserve it, never rewrite
+                raise RuntimeError(
+                    "perseus-vault: existing perseus-vault.json root is "
+                    "not a JSON object; refusing to rewrite it")
+            data = loaded
         v = values if isinstance(values, dict) else {}
         url = str(v.get("url") or "").strip()
         if url:
@@ -3189,9 +3194,28 @@ def merge_json_config(config_file: Path, url: str, workspace: str) -> dict:
     merged = {}
     if config_file.exists():
         raw = config_file.read_text()
-        backup = config_file.with_name(
-            "perseus-vault.json.bak-%s" % _now_stamp())
-        backup.write_text(raw)
+        # the backup may hold legacy api_key: it must NEVER be less
+        # protected than the original (review 2026-11-10). O_EXCL keeps
+        # creation atomic at mode 600; a numeric suffix resolves same-
+        # second collisions deterministically.
+        base = "perseus-vault.json.bak-%s" % _now_stamp()
+        backup = config_file.with_name(base)
+        for attempt in range(1, 100):
+            try:
+                fd = os.open(str(backup),
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                break
+            except FileExistsError:
+                backup = config_file.with_name("%s-%d" % (base, attempt))
+        else:
+            raise RuntimeError("could not create a unique config backup")
+        with os.fdopen(fd, "w") as bf:
+            bf.write(raw)
+        os.chmod(backup, 0o600)
+        if oct(os.stat(backup).st_mode)[-3:] != "600":
+            raise RuntimeError(
+                "backup %s did not end at mode 600; refusing to rewrite "
+                "config" % backup.name)
         log_info(f"Backed up existing config to {backup.name}")
         try:
             loaded = json.loads(raw)

@@ -3087,6 +3087,44 @@ def write_plugin_files(plugin_dir: Path) -> None:
     log_ok("Plugin files created")
 
 
+def merge_json_config(config_file: Path, url: str, workspace: str) -> dict:
+    """Update perseus-vault.json WITHOUT discarding keys this installer
+    does not own (I2/D3 contract):
+
+    - api_key (legacy) is never written and never removed: an existing
+      value is preserved byte-for-byte as a read-only legacy fallback.
+    - unknown future keys are preserved for the same reason.
+    - url is always set (the installer owns it); workspace_hash is set
+      only when a value was provided.
+    - an existing file is backed up before being rewritten.
+
+    Returns the merged dict (for logging/tests).
+    """
+    merged = {}
+    if config_file.exists():
+        raw = config_file.read_text()
+        backup = config_file.with_name(
+            "perseus-vault.json.bak-%s" % _now_stamp())
+        backup.write_text(raw)
+        log_info(f"Backed up existing config to {backup.name}")
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                merged = loaded
+            else:
+                log_warn("existing perseus-vault.json is not an object; "
+                         "keeping backup, writing fresh config")
+        except Exception as e:
+            log_warn(f"existing perseus-vault.json unparsable ({e}); "
+                     "keeping backup, writing fresh config")
+    merged["url"] = url
+    if workspace:
+        merged["workspace_hash"] = workspace
+    config_file.write_text(json.dumps(merged, indent=2))
+    config_file.chmod(0o600)
+    return merged
+
+
 def write_env_token(hermes_home: Path, token: str) -> None:
     """Persist the token to $HERMES_HOME/.env (backup first, mode 600)."""
     env_file = hermes_home / ".env"
@@ -3216,11 +3254,10 @@ def main() -> int:
     write_env_token(hermes_home, env_token)
 
     config_file = hermes_home / "perseus-vault.json"
-    config = {"url": mcp_url}
-    if workspace:
-        config["workspace_hash"] = workspace
-    config_file.write_text(json.dumps(config, indent=2))
-    config_file.chmod(0o600)
+    merged = merge_json_config(config_file, mcp_url, workspace)
+    if "api_key" in merged:
+        log_info("legacy api_key in perseus-vault.json left untouched "
+                 "(read-only; effective token comes from .env when set)")
     log_ok(f"Config saved to {config_file} (mode 600)")
 
     log_info("Setting memory.provider...")

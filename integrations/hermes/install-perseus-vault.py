@@ -3185,6 +3185,12 @@ def merge_json_config(config_file: Path, url: str, workspace: str) -> dict:
     - api_key (legacy) is never written and never removed: an existing
       value is preserved byte-for-byte as a read-only legacy fallback.
     - unknown future keys are preserved for the same reason.
+    - EXCEPTION to the preservation rule (policy A, review 2026-11-10):
+      if the existing file is unparsable or its root is not a JSON
+      object, the installer warns, keeps the original bytes in a
+      0600 backup for manual recovery, and writes a fresh config.
+      "unknown keys are never removed" does not hold for an invalid
+      file; it is replaced deliberately, never silently.
     - url is always set (the installer owns it); workspace_hash is set
       only when a value was provided.
     - an existing file is backed up before being rewritten.
@@ -3198,7 +3204,7 @@ def merge_json_config(config_file: Path, url: str, workspace: str) -> dict:
         # protected than the original (review 2026-11-10). O_EXCL keeps
         # creation atomic at mode 600; a numeric suffix resolves same-
         # second collisions deterministically.
-        base = "perseus-vault.json.bak-%s" % _now_stamp()
+        base = "%s.bak-%s" % (config_file.name, _now_stamp())
         backup = config_file.with_name(base)
         for attempt in range(1, 100):
             try:

@@ -352,6 +352,12 @@ Single source of truth for the bearer token: **core → `.env`**
   `save_config()` never persists secrets and never writes a token.
 - No update — installer or panel — overwrites or deletes an existing
   token due to a missing, empty, or incomplete value.
+- **Documented exception (auto-recovery):** if `perseus-vault.json`
+  is unparsable or its root is not a JSON object, the installer warns,
+  preserves the original bytes in a `perseus-vault.json.bak-*` file
+  (mode 600) for manual recovery, and writes a fresh config. The
+  "keys are never removed" rule describes valid files only; an invalid
+  file is replaced deliberately, never silently.
 - Secrets are never printed: `hermes memory status` shows `set` /
   `MISSING`; `cli.py config` excludes `api_key`.
 - A failed config write raises an explicit error through the host

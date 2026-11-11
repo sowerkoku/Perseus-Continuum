@@ -107,10 +107,11 @@ def e1(installer_mod):
         if not list(cfg.parent.glob("perseus-vault.json.bak-*")):
             problems.append("no backup of previous file")
         else:
-            bak = list(cfg.parent.glob("perseus-vault.json.bak-*"))[0]
-            if oct(bak.stat().st_mode)[-3:] != "600":
-                problems.append(f"backup mode {oct(bak.stat().st_mode)} "
-                                "(must be 600: it may hold legacy api_key)")
+            for bak in cfg.parent.glob("perseus-vault.json.bak-*"):
+                if oct(bak.stat().st_mode)[-3:] != "600":
+                    problems.append(f"backup {bak.name} mode "
+                                    f"{oct(bak.stat().st_mode)} "
+                                    "(must be 600)")
         if oct(cfg.stat().st_mode)[-3:] != "600":
             problems.append(f"mode {oct(cfg.stat().st_mode)}")
         # second run with workspace provided: explicit update wins
@@ -118,6 +119,30 @@ def e1(installer_mod):
         on_disk = json.loads(cfg.read_text())
         if on_disk.get("workspace_hash") != "ws-new":
             problems.append("provided workspace not applied")
+        # two updates -> two DISTINCT backups, all at mode 600
+        backups = sorted(cfg.parent.glob("perseus-vault.json.bak-*"))
+        if len(backups) < 2:
+            problems.append(f"expected 2 distinct backups, found "
+                            f"{len(backups)}")
+        for bak in backups:
+            if oct(bak.stat().st_mode)[-3:] != "600":
+                problems.append(f"backup {bak.name} mode "
+                                f"{oct(bak.stat().st_mode)}")
+        if len({bak.read_text() for bak in backups}) < 1:
+            problems.append("backups unreadable")
+        # documented exception (policy A): invalid file is replaced
+        # deliberately; original bytes survive in a 600 backup.
+        bad_cfg = Path(td) / "inv-perseus-vault.json"
+        bad_cfg.write_text("{broken")
+        installer_mod.merge_json_config(bad_cfg, "http://fresh/message", "")
+        on_disk = json.loads(bad_cfg.read_text())
+        if on_disk.get("url") != "http://fresh/message":
+            problems.append("auto-recovery did not write a fresh config")
+        inv_baks = sorted(Path(td).glob("inv-perseus-vault.json.bak-*"))
+        if not inv_baks or inv_baks[-1].read_text() != "{broken":
+            problems.append("auto-recovery lost the original bytes")
+        elif oct(inv_baks[-1].stat().st_mode)[-3:] != "600":
+            problems.append("auto-recovery backup not mode 600")
         # simulated OLD behavior (the exact pattern removed from main) for
         # gap-detection evidence:
         old_style = {"url": "http://new/message"}

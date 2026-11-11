@@ -353,7 +353,7 @@ class StageFail:
         self.d = delegate
         self.stage = stage
         self.shape = shape
-        self._fired = False
+        self.fired = 0  # exact number of intercepted target calls
 
     def _resp(self):
         if self.shape == "qrn":
@@ -363,8 +363,6 @@ class StageFail:
         return {"ok": False, "text": "stage-rejected", "data": None}
 
     def _matches(self, name, a):
-        if self._fired:
-            return False
         if self.stage == "ckpt-write":
             return (name == "perseus_vault_remember"
                     and a.get("category") == "checkpoint"
@@ -393,7 +391,11 @@ class StageFail:
     def call_tool(self, name, arguments=None, timeout=30.0):
         a = dict(arguments or {})
         if self._matches(name, a):
-            self._fired = True
+            # stage stays down: EVERY call to this stage fails (a one-shot
+            # injection could silently become a no-op if the target call
+            # never happened; the provider must cope with a persistent
+            # stage failure, which is the realistic outage shape)
+            self.fired += 1
             self.d.calls.append((name, a))
             return self._resp()
         return self.d.call_tool(name, a, timeout)
@@ -438,7 +440,8 @@ def _scenario(mod, case):
     trace = [(n, json.dumps(a, sort_keys=True, ensure_ascii=False))
              for (n, a) in client.calls]
     state = _final_state(vault) if vault is not None else None
-    return trace, (res, raised), state
+    fired = getattr(client, "fired", None)  # None for the generic case
+    return trace, (res, raised), state, fired
 
 
 # Failure matrix required by review 2026-11-10: independent failure at each
@@ -461,9 +464,19 @@ def c7(new_mod, old_mod):
     problems = []
     detected_something = False  # anti-false-positive sentinel
     for case in C7_MATRIX:
-        t_new, r_new, s_new = _scenario(new_mod, case)
-        t_old, r_old, s_old = _scenario(old_mod, case)
+        t_new, r_new, s_new, f_new = _scenario(new_mod, case)
+        t_old, r_old, s_old, f_old = _scenario(old_mod, case)
         label = f"{case['stage']}/{case['shape']}"
+        # per-case injector validity (review 2026-11-10): a wrong
+        # _matches() predicate could otherwise pass a scenario with no
+        # injection at all and still show parity.
+        if case["stage"] is not None:
+            if f_new != 1:
+                problems.append(f"[{label}] target call intercepted {f_new} "
+                                f"times on NEW (must be exactly 1)")
+            if f_old != 1:
+                problems.append(f"[{label}] target call intercepted {f_old} "
+                                f"times on OLD (must be exactly 1)")
         if t_new != t_old:
             detail = []
             for i in range(max(len(t_new), len(t_old))):

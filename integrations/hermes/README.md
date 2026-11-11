@@ -328,6 +328,18 @@ The provider resolves config in this order: **env vars → config.yaml
 
 ## What the installer does
 
+0. **Host-contract gate (fail-closed, before anything else):** the
+   installed Hermes must be exactly `0.23.1`, with
+   `spawn_context_thread` importable, `on_session_switch` exposing
+   `new_session_id`/`parent_session_id`/`reset`/`rewound` as explicit
+   parameters, and `MemoryManager.initialize_all` verifiably passing
+   `hermes_home`; declared version must match the embedded
+   `plugin.yaml`. Version is read from the installed host itself
+   (never inferred from the installer). Any unverifiable condition
+   aborts with a non-zero exit and ZERO files created or modified.
+   `PERSEUS_GATE_HOST_ROOT` is a strict test/diagnostic seam (the
+   given root is the only one considered; no fallback). Enforced by
+   `tests/test_installer_gate_d1.py` (Suite F).
 1. Writes the plugin to `$HERMES_HOME/plugins/perseus-vault/`
    (`plugin.yaml`, `__init__.py`, `provider.py`, `cli.py`)
 2. `hermes plugins enable perseus-vault`

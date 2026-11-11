@@ -31,6 +31,7 @@ Versioned line (contract with users — see integrations/hermes/README.md):
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -122,6 +123,157 @@ def plugin_yaml_version() -> str:
         if line.startswith("version:"):
             return line.split(":", 1)[1].strip().strip('"').strip("'")
     return ""
+
+
+# ===========================================================================
+# D1 host-contract gate — fail-closed, runs BEFORE any prompt or write
+# ===========================================================================
+
+GATE_REQUIRED_VERSION = "0.23.1"
+
+
+class HostContractError(RuntimeError):
+    """The installed Hermes does not satisfy the integration contract."""
+
+
+def _discover_host_root() -> Path:
+    """Locate the installed host root through its OWN launcher.
+
+    The PATH entry may be a thin `exec` wrapper; the chain is followed
+    (bounded) until a script contains the host sys.path insertion."""
+    exe = shutil.which("hermes")
+    if not exe:
+        raise HostContractError("hermes executable not found in PATH")
+    p = Path(exe)
+    root_text = None
+    for _hop in range(8):
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            raise HostContractError(f"cannot inspect launcher {p}: {e}")
+        m = re.search(r"sys\.path\.insert\(\d+,\s*['\"]+([^'\"]+)['\"]+",
+                      text)
+        if m:
+            root_text = m.group(1)
+            break
+        m2 = re.search(r"^exec\s+(\S+)", text, re.MULTILINE)
+        if not m2:
+            raise HostContractError(
+                "installed host root not discoverable from its launcher")
+        p = Path(m2.group(1))
+        if not p.is_absolute():
+            p = (exe and Path(exe).parent / p) or p
+    if root_text is None:
+        raise HostContractError("launcher chain too deep to resolve")
+    root = Path(root_text)
+    if not (root / "agent" / "memory_provider.py").is_file():
+        raise HostContractError(
+            f"discovered host root {root} lacks agent/memory_provider.py")
+    return root
+
+
+def check_host_contract(host_root=None) -> str:
+    """G1-G5 from the authorized D1 contract. Fail-closed: every
+    unverifiable condition is a failure. Returns the version on success.
+
+    PERSEUS_GATE_HOST_ROOT (or host_root arg): strict test/diagnostic
+    seam — when set it is the ONLY considered root; failure never falls
+    back to the real host. No other knobs, no permissive warnings.
+    """
+    override = (host_root or
+                os.environ.get("PERSEUS_GATE_HOST_ROOT", "")).strip()
+    if override:
+        root = Path(override)
+        if not (root / "agent" / "memory_provider.py").is_file():
+            raise HostContractError(
+                f"PERSEUS_GATE_HOST_ROOT={root} is not a host root")
+    else:
+        root = _discover_host_root()
+
+    import ast as _ast
+    import importlib
+    import inspect as _inspect
+
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    # deterministic inspection: drop any previously-loaded host modules
+    for _m in ("hermes_cli", "agent", "agent.memory_provider",
+               "agent.memory_manager"):
+        sys.modules.pop(_m, None)
+
+    # G1: exact version from the installed host itself
+    try:
+        hc = importlib.import_module("hermes_cli")
+        version = str(getattr(hc, "__version__", "") or "")
+    except Exception as e:
+        raise HostContractError(
+            f"installed host version not readable: {e}")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise HostContractError(
+            f"installed host version is not unambiguously readable: "
+            f"{version!r}")
+    if version != GATE_REQUIRED_VERSION:
+        raise HostContractError(
+            f"this line targets Hermes exactly {GATE_REQUIRED_VERSION}; "
+            f"installed host is {version}")
+
+    # G2: spawn_context_thread importable from the real module
+    try:
+        mp = importlib.import_module("agent.memory_provider")
+        if not callable(getattr(mp, "spawn_context_thread", None)):
+            raise AttributeError("missing or not callable")
+    except HostContractError:
+        raise
+    except Exception as e:
+        raise HostContractError(
+            f"spawn_context_thread not importable from the installed "
+            f"host: {e}")
+
+    # G3: on_session_switch with explicit parameters (not **kwargs)
+    try:
+        sig = _inspect.signature(mp.MemoryProvider.on_session_switch)
+    except Exception as e:
+        raise HostContractError(
+            f"on_session_switch not present/inspectable on the installed "
+            f"host: {e}")
+    for _name in ("new_session_id", "parent_session_id", "reset",
+                  "rewound"):
+        _p = sig.parameters.get(_name)
+        if _p is None or _p.kind == _inspect.Parameter.VAR_KEYWORD:
+            raise HostContractError(
+                f"on_session_switch parameter {_name!r} is not explicit "
+                f"in the installed host")
+
+    # G4: the real initialization call verifiably passes hermes_home
+    # (AST-scoped to MemoryManager.initialize_all; text search elsewhere
+    # is not evidence).
+    try:
+        tree = _ast.parse(
+            (root / "agent" / "memory_manager.py").read_text(
+                encoding="utf-8"))
+        init_fn = next(
+            fn for cls in tree.body
+            if isinstance(cls, _ast.ClassDef) and cls.name == "MemoryManager"
+            for fn in cls.body
+            if isinstance(fn, _ast.FunctionDef)
+            and fn.name == "initialize_all")
+        seg = _ast.unparse(init_fn)
+    except Exception as e:
+        raise HostContractError(
+            f"initialization contract not verifiable "
+            f"(MemoryManager.initialize_all): {e}")
+    if "hermes_home" not in seg or ".initialize(" not in seg:
+        raise HostContractError(
+            "MemoryManager.initialize_all does not verifiably inject and "
+            "propagate hermes_home")
+
+    # G5: declared version == embedded plugin.yaml (BEFORE any write)
+    declared_yaml = plugin_yaml_version()
+    if declared_yaml != PLUGIN_VERSION:
+        raise HostContractError(
+            f"internal inconsistency: installer declares {PLUGIN_VERSION} "
+            f"but embedded plugin.yaml declares {declared_yaml!r}")
+    return version
 
 
 # ===========================================================================
@@ -3274,6 +3426,16 @@ def main() -> int:
     print("  Perseus Vault Memory Provider Installer for Hermes")
     print("=" * 60)
     print()
+
+    # D1 contract gate (fail-closed): runs BEFORE anything touches the
+    # host - no prompts, no host commands, no writes.
+    try:
+        _cv = check_host_contract()
+        log_ok(f"Host contract gate OK (G1-G5): Hermes {_cv}")
+    except HostContractError as e:
+        log_error(f"Host contract gate: {e}")
+        log_error("Aborting with NO changes made (fail closed).")
+        return 1
 
     # Check Hermes
     log_info("Checking Hermes installation...")

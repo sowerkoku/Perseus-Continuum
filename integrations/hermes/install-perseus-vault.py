@@ -2016,6 +2016,49 @@ class PerseusVaultProvider(MemoryProvider):
             self._turn_buffer = self._turn_buffer[-_TURN_BUFFER_CAP:]
 
     # ------------------------------------------------------------------
+    # Mid-process session rebinding (Hermes on_session_switch contract)
+    # ------------------------------------------------------------------
+
+    def on_session_switch(self, new_session_id: str, *,
+                         parent_session_id: str = "", reset: bool = False,
+                         rewound: bool = False, **kwargs) -> None:
+        """Rebind per-session state when session_id rotates without
+        teardown (/resume, /branch, /reset, /new, /undo, compression).
+
+        Contract (design rev.4, review conditions 2026-11-10):
+        - rewound (=/undo): same id, transcript truncated -> the pending
+          turn buffer is dropped (it may hold undone content).
+        - reset: genuinely new conversation -> buffers cleared, id
+          rebound.
+        - plain switch (/branch, /resume mid-process): id rebound;
+          buffered turns are PRESERVED with their original association.
+          The host never re-passes gateway_session_key: chat identity
+          (_session_label) is deliberately untouched, and entries are
+          never inherited by, nor reassigned to, another record.
+        - ownership validation: a parent_session_id that does not match
+          this instance warns explicitly; the rebinding still applies
+          (the host is authoritative) but entries are never re-tagged.
+        - This method performs NO Vault calls: it never captures,
+          distills, marks or emits receipts, and never touches
+          checkpoints or receipts.
+        """
+        if not self._enabled:
+            return
+        if parent_session_id and parent_session_id != self._session_id:
+            logger.warning(
+                "perseus-vault: on_session_switch parent_session_id (%s) "
+                "does not match this instance's session (%s); rebinding "
+                "without touching buffered turns",
+                parent_session_id[:16], (self._session_id or "")[:16])
+        if rewound:
+            # /undo: pending buffer content was just undone — invalid.
+            self._turn_buffer.clear()
+            return
+        if reset:
+            self._turn_buffer.clear()
+        self._session_id = new_session_id
+
+    # ------------------------------------------------------------------
     # Pre-compress checkpoints (Hermes checkpoint API v2)
     # ------------------------------------------------------------------
 

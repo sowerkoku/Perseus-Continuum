@@ -51,19 +51,34 @@ def check(name, ok, detail=""):
 # ---------------------------------------------------------------------
 
 def snapshot(root: Path) -> dict:
+    """Full-tree capture: regular files (content + mode), directories
+    (mode), symlinks (target + mode), other entries (mode). Used to
+    assert the absence of side effects; it must also be sensitive to
+    chmod, symlink retargeting and new/removed directories."""
     out = {}
     if not root.exists():
         return out
-    for p in sorted(root.rglob("*")):
-        if p.is_file():
-            out[str(p.relative_to(root))] = (
-                hashlib.sha256(p.read_bytes()).hexdigest(),
-                oct(p.stat().st_mode)[-3:])
+
+    def walk(d: Path):
+        for e in os.scandir(d):
+            rel = str(Path(e.path).relative_to(root))
+            mode = oct(e.stat(follow_symlinks=False).st_mode)[-3:]
+            if e.is_symlink():
+                out[rel] = ("LINK", os.readlink(e.path), mode)
+            elif e.is_dir(follow_symlinks=False):
+                out[rel] = ("DIR", mode)
+                walk(Path(e.path))
+            elif e.is_file(follow_symlinks=False):
+                out[rel] = ("FILE", hashlib.sha256(
+                    Path(e.path).read_bytes()).hexdigest(), mode)
+            else:
+                out[rel] = ("SPECIAL", mode)
+    walk(root)
     return out
 
 
 def run_installer(home: Path, *, token="gate-test-token",
-                  gate_root=None, timeout=40):
+                  gate_root=None, path_prepend=None, timeout=40):
     """Run the real installer against an isolated HERMES_HOME.
 
     Post-write verification steps are slow by design; the gate must
@@ -71,10 +86,13 @@ def run_installer(home: Path, *, token="gate-test-token",
     'the installer proceeded past the write point' (proceeded=True).
     """
     env = dict(os.environ)
-    for leak in ("PERSEUS_VAULT_MCP_TOKEN", "MCP_PERSEUS_VAULT_API_KEY"):
+    for leak in ("PERSEUS_VAULT_MCP_TOKEN", "MCP_PERSEUS_VAULT_API_KEY",
+                 "PERSEUS_GATE_HOST_ROOT"):
         env.pop(leak, None)
     env["HERMES_HOME"] = str(home)
     env["PERSEUS_VAULT_URL"] = "http://127.0.0.1:1/message"
+    if path_prepend:
+        env["PATH"] = str(path_prepend) + os.pathsep + env.get("PATH", "")
     if token is not None:
         env["PERSEUS_VAULT_MCP_TOKEN"] = token
     if gate_root is not None:
@@ -106,7 +124,7 @@ OSS_KWARGS = ('    def on_session_switch(self, new_session_id, **kwargs):\n'
 
 
 def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
-              mm_home=True, mm_exists=True):
+              mm_home=True, mm_exists=True, mm_mode=None):
     (root / "hermes_cli").mkdir(parents=True, exist_ok=True)
     (root / "hermes_cli" / "__init__.py").write_text(
         ('' if version is None else f'__version__ = "{version}"\n'))
@@ -129,11 +147,38 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
         mp.append('    pass\n')
     (ag / "memory_provider.py").write_text("".join(mp))
     if mm_exists:
-        body = ('    def initialize_all(self, session_id, **kwargs):\n'
-                + ('        kwargs["hermes_home"] = "/stub"\n' if mm_home
-                   else '        kwargs["other"] = "/stub"\n')
-                + '        for p in self._providers:\n'
-                  '            p.initialize(session_id=session_id, **kwargs)\n')
+        if mm_mode is None:
+            mm_mode = "kwargs" if mm_home else "wrongkey"
+        if mm_mode == "kwargs":
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        kwargs["hermes_home"] = "/stub"\n'
+                    '        for p in self._providers:\n'
+                    '            p.initialize(session_id=session_id, **kwargs)\n')
+        elif mm_mode == "direct":
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        for p in self._providers:\n'
+                    '            p.initialize(session_id=session_id,\n'
+                    '                         hermes_home="/stub", **kwargs)\n')
+        elif mm_mode == "wrongkey":
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        kwargs["hermes_dir"] = "/stub"\n'
+                    '        for p in self._providers:\n'
+                    '            p.initialize(session_id=session_id, **kwargs)\n')
+        elif mm_mode == "unused":
+            # key appears in a local dict that never reaches the call:
+            # structurally similar, but NOT propagation
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        cfg = {"hermes_home": "/stub"}\n'
+                    '        kwargs["other"] = "x"\n'
+                    '        for p in self._providers:\n'
+                    '            p.initialize(session_id=session_id,\n'
+                    '                         **{"other": "x"})\n')
+        elif mm_mode == "nocall":
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        kwargs["hermes_home"] = "/stub"\n'
+                    '        self._ready = True\n')
+        else:
+            raise ValueError(f"unknown mm_mode {mm_mode!r}")
         (ag / "memory_manager.py").write_text(
             "class MemoryManager:\n" + body)
     return root
@@ -263,6 +308,156 @@ def f7(tmp):
     return (not problems), "; ".join(problems)
 
 
+# ---------------------------------------------------------------------
+# G4 semantic-propagation cases: one per defect class.
+# Negatives must FAIL the gate even when the text mentions hermes_home
+# and an initialize() call (the old substring check passed them).
+# ---------------------------------------------------------------------
+
+def g4_suite(tmp):
+    yield ("G4a no initialize() call -> abort",
+           lambda: expect_abort(tmp, "g4a", {"mm_mode": "nocall"},
+                                "propagate"))
+    yield ("G4b key never reaches the call -> abort",
+           lambda: expect_abort(tmp, "g4b", {"mm_mode": "wrongkey"},
+                                "propagate"))
+    yield ("G4c local hermes_home not passed -> abort",
+           lambda: expect_abort(tmp, "g4c", {"mm_mode": "unused"},
+                                "propagate"))
+
+
+def g4d(tmp):
+    # positive control: direct hermes_home= keyword is a valid
+    # propagation form and must be ACCEPTED
+    home = tmp / "g4d-home"
+    home.mkdir()
+    stub = make_stub(tmp / "g4d-host", mm_mode="direct")
+    before = snapshot(home)
+    r = run_installer(home, gate_root=stub)
+    if not snapshot(home):
+        return False, ("gate rejected direct kwarg "
+                       f"(tail: {(r.stdout + r.stderr)[-200:]})")
+    return True, ""
+
+
+# ---------------------------------------------------------------------
+# L: launcher discovery determinism. Pure gate probes (no installer
+# side effects): PATH is prepended with a controlled chain directory.
+# ---------------------------------------------------------------------
+
+def gate_probe(path_prepend=None, timeout=120):
+    code = (
+        "import importlib.util, sys;"
+        f"spec = importlib.util.spec_from_file_location('inst', {str(INSTALLER)!r});"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
+        "d = m._discover_host_root();"
+        "v = m.check_host_contract();"
+        "print('GATE_OK', v, str(d))")
+    env = dict(os.environ)
+    env.pop("PERSEUS_GATE_HOST_ROOT", None)
+    if path_prepend:
+        env["PATH"] = str(path_prepend) + os.pathsep + env.get("PATH", "")
+    return subprocess.run([sys.executable, "-c", code], env=env,
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def l1(tmp):
+    # 3-hop chain with RELATIVE exec targets: each target must resolve
+    # against the directory of the script being read (p.parent). The
+    # third hop lives under bin/sub/deeper, NOT under bin/ - resolving
+    # from the entry wrapper's directory would miss it.
+    host = make_stub(tmp / "l1-host")
+    chain = tmp / "l1-chain"
+    (chain / "bin" / "sub" / "deeper").mkdir(parents=True)
+    hops = {chain / "bin" / "hermes": '#!/bin/sh\nexec sub/l2 "$@"\n',
+            chain / "bin" / "sub" / "l2": '#!/bin/sh\nexec deeper/l3 "$@"\n'}
+    for p, txt in hops.items():
+        p.write_text(txt)
+        p.chmod(0o755)
+    l3f = chain / "bin" / "sub" / "deeper" / "l3"
+    l3f.write_text(
+        "#!/usr/bin/env python3\nimport sys\n"
+        f"sys.path.insert(0, '\"'\"'{host}'\"'\"')\nprint('stub')\n")
+    l3f.chmod(0o755)
+    r = gate_probe(path_prepend=chain / "bin")
+    out = r.stdout + r.stderr
+    if f"GATE_OK 0.23.1 {host}" not in r.stdout:
+        return False, f"chain not resolved via p.parent to the stub: {out[-250:]}"
+    return True, ""
+
+
+def l2(tmp):
+    # quoted exec target + shell quote-joined sys.path literal
+    host = make_stub(tmp / "l2-host")
+    chain = tmp / "l2-chain"
+    (chain / "bin" / "inner").mkdir(parents=True)
+    w1 = chain / "bin" / "hermes"
+    w1.write_text("#!/bin/sh\nexec 'inner/l2' \"$@\"\n")
+    w1.chmod(0o755)
+    inner = chain / "bin" / "inner" / "l2"
+    inner.write_text(
+        "#!/usr/bin/env python3\nimport sys\n"
+        f"sys.path.insert(0, '\"'\"'{host}'\"'\"')\nprint('stub')\n")
+    inner.chmod(0o755)
+    r = gate_probe(path_prepend=chain / "bin")
+    if f"GATE_OK 0.23.1 {host}" not in r.stdout:
+        return False, f"quoted exec/quote-join not resolved to the stub: {(r.stdout + r.stderr)[-250:]}"
+    return True, ""
+
+
+def l3(tmp):
+    # bounded: a chain deeper than the cap aborts explicitly (no open
+    # recursion, no heuristic picking of another installation)
+    chain = tmp / "l3-chain"
+    (chain / "bin").mkdir(parents=True)
+    names = ["hermes"] + [f"w{i}" for i in range(2, 11)]
+    for i, name in enumerate(names):
+        nxt = names[i + 1] if i + 1 < len(names) else "dead-end"
+        p = chain / "bin" / name
+        p.write_text(f'#!/bin/sh\nexec {nxt} "$@"\n')
+        p.chmod(0o755)
+    r = gate_probe(path_prepend=chain / "bin")
+    if r.returncode == 0:
+        return False, "deep chain accepted"
+    if "chain too deep" not in (r.stdout + r.stderr):
+        return False, f"no explicit depth error: {(r.stdout + r.stderr)[-250:]}"
+    return True, ""
+
+
+# ---------------------------------------------------------------------
+# SN: snapshot-mechanism self-check (test machinery, not installer
+# behavior): must be sensitive to chmod, symlink retargeting and new
+# directories, and must record directories/links at all.
+# ---------------------------------------------------------------------
+
+def sn1(tmp):
+    root = tmp / "sn1"
+    root.mkdir()
+    (root / "f.txt").write_text("a")
+    (root / "d").mkdir()
+    (root / "link").symlink_to(root / "f.txt")
+    s1 = snapshot(root)
+    problems = []
+    if not any(v[0] == "LINK" for v in s1.values()):
+        problems.append("symlink not captured")
+    if not any(v[0] == "DIR" for v in s1.values()):
+        problems.append("directory not captured")
+    (root / "f.txt").chmod(0o600)
+    if snapshot(root) == s1:
+        problems.append("chmod invisible to snapshot")
+    s1 = snapshot(root)
+    (root / "same.txt").write_text("a")
+    (root / "link").unlink()
+    (root / "link").symlink_to(root / "same.txt")
+    if snapshot(root) == s1:
+        problems.append("symlink retarget invisible (identical content)")
+    s1 = snapshot(root)
+    (root / "newemptydir").mkdir()
+    if snapshot(root) == s1:
+        problems.append("new empty directory invisible")
+    return (not problems), "; ".join(problems)
+
+
 def main():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -271,6 +466,23 @@ def main():
         for name, fn in f_suite(tmp):
             try:
                 ok, det = fn()
+            except Exception as e:
+                ok, det = False, f"unexpected: {type(e).__name__}: {e}"
+            check(name, ok, det)
+        for name, fn in g4_suite(tmp):
+            try:
+                ok, det = fn()
+            except Exception as e:
+                ok, det = False, f"unexpected: {type(e).__name__}: {e}"
+            check(name, ok, det)
+        ok, det = g4d(tmp)
+        check("G4d direct hermes_home kwarg -> accepted", ok, det)
+        for name, fn in (("L1 relative exec chain resolves via p.parent", l1),
+                         ("L2 quoted exec + quote-joined path literal", l2),
+                         ("L3 chain deeper than cap -> explicit abort", l3),
+                         ("SN1 snapshot sensitivity (dir/link/chmod)", sn1)):
+            try:
+                ok, det = fn(tmp)
             except Exception as e:
                 ok, det = False, f"unexpected: {type(e).__name__}: {e}"
             check(name, ok, det)

@@ -136,11 +136,95 @@ class HostContractError(RuntimeError):
     """The installed Hermes does not satisfy the integration contract."""
 
 
+def _gate_proves_key_passed(fn_node, ast_mod, key: str) -> bool:
+    """True iff at least one real .initialize(...) call inside fn_node
+    passes `key` as an argument of the call itself:
+
+      - a direct keyword  initialize(..., key=...), or
+      - a dict literal carrying the key, or
+      - **name unpacking where `name` provably carries the key inside
+        this function (d[key] = ..., d = {...key...}, alias of a proven
+        dict, or d.update({...key...})).
+
+    Fixed-point over assignments in this function only. Deterministic:
+    no text matching, no heuristics; unresolvable propagation is NOT
+    evidence, and references that never reach a call are not counted.
+    """
+    proven = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast_mod.walk(fn_node):
+            if isinstance(node, ast_mod.Assign):
+                for t in node.targets:
+                    if (isinstance(t, ast_mod.Subscript)
+                            and isinstance(t.slice, ast_mod.Constant)
+                            and t.slice.value == key
+                            and isinstance(t.value, ast_mod.Name)):
+                        if t.value.id not in proven:
+                            proven.add(t.value.id)
+                            changed = True
+                    elif (isinstance(t, ast_mod.Name)
+                            and isinstance(node.value, ast_mod.Dict)):
+                        if any(isinstance(k, ast_mod.Constant)
+                               and k.value == key
+                               for k in node.value.keys):
+                            if t.id not in proven:
+                                proven.add(t.id)
+                                changed = True
+                    elif (isinstance(t, ast_mod.Name)
+                            and isinstance(node.value, ast_mod.Name)):
+                        if node.value.id in proven and t.id not in proven:
+                            proven.add(t.id)
+                            changed = True
+            elif (isinstance(node, ast_mod.Call)
+                    and isinstance(node.func, ast_mod.Attribute)
+                    and node.func.attr == "update"
+                    and isinstance(node.func.value, ast_mod.Name)):
+                tgt = node.func.value.id
+                if tgt in proven:
+                    continue
+                for a in node.args:
+                    if ((isinstance(a, ast_mod.Dict)
+                            and any(isinstance(k, ast_mod.Constant)
+                                    and k.value == key
+                                    for k in a.keys))
+                            or (isinstance(a, ast_mod.Name)
+                                and a.id in proven)):
+                        proven.add(tgt)
+                        changed = True
+                        break
+    calls = [n for n in ast_mod.walk(fn_node)
+             if isinstance(n, ast_mod.Call)
+             and isinstance(n.func, ast_mod.Attribute)
+             and n.func.attr == "initialize"]
+    if not calls:
+        return False
+    for c in calls:
+        for kw in c.keywords:
+            if kw.arg == key:
+                return True
+            if kw.arg is None:
+                v = kw.value
+                if isinstance(v, ast_mod.Name) and v.id in proven:
+                    return True
+                if (isinstance(v, ast_mod.Dict)
+                        and any(isinstance(k, ast_mod.Constant)
+                                and k.value == key for k in v.keys)):
+                    return True
+    return False
+
+
 def _discover_host_root() -> Path:
     """Locate the installed host root through its OWN launcher.
 
-    The PATH entry may be a thin `exec` wrapper; the chain is followed
-    (bounded) until a script contains the host sys.path insertion."""
+    Deterministic by construction: exactly one PATH candidate (the
+    first hit of which()), its exec chain followed up to 8 hops, the
+    host root taken from the host's own sys.path insertion. No
+    searching, no alternative candidates, no fallbacks. Relative exec
+    targets resolve against the directory of the script being read
+    (p.parent), never against the entry wrapper's directory; quoted
+    exec targets are accepted."""
     exe = shutil.which("hermes")
     if not exe:
         raise HostContractError("hermes executable not found in PATH")
@@ -156,13 +240,16 @@ def _discover_host_root() -> Path:
         if m:
             root_text = m.group(1)
             break
-        m2 = re.search(r"^exec\s+(\S+)", text, re.MULTILINE)
+        m2 = re.search(r"^exec\s+(?:'([^']+)'|\"([^\"]+)\"|(\S+))",
+                       text, re.MULTILINE)
         if not m2:
             raise HostContractError(
                 "installed host root not discoverable from its launcher")
-        p = Path(m2.group(1))
-        if not p.is_absolute():
-            p = (exe and Path(exe).parent / p) or p
+        target = next(g for g in m2.groups() if g)
+        nxt = Path(target)
+        if not nxt.is_absolute():
+            nxt = p.parent / nxt
+        p = nxt
     if root_text is None:
         raise HostContractError("launcher chain too deep to resolve")
     root = Path(root_text)
@@ -244,9 +331,12 @@ def check_host_contract(host_root=None) -> str:
                 f"on_session_switch parameter {_name!r} is not explicit "
                 f"in the installed host")
 
-    # G4: the real initialization call verifiably passes hermes_home
-    # (AST-scoped to MemoryManager.initialize_all; text search elsewhere
-    # is not evidence).
+    # G4: the real initialization call verifiably PROPAGATES
+    # hermes_home to the initialize() call itself. AST-scoped to
+    # MemoryManager.initialize_all; structural similarity (unparse +
+    # substring) is not evidence, and locals that never reach the call
+    # are not evidence. Propagation forms accepted exactly as Hermes
+    # expresses them: direct keyword or **dict carrying the key.
     try:
         tree = _ast.parse(
             (root / "agent" / "memory_manager.py").read_text(
@@ -257,15 +347,14 @@ def check_host_contract(host_root=None) -> str:
             for fn in cls.body
             if isinstance(fn, _ast.FunctionDef)
             and fn.name == "initialize_all")
-        seg = _ast.unparse(init_fn)
     except Exception as e:
         raise HostContractError(
             f"initialization contract not verifiable "
             f"(MemoryManager.initialize_all): {e}")
-    if "hermes_home" not in seg or ".initialize(" not in seg:
+    if not _gate_proves_key_passed(init_fn, _ast, "hermes_home"):
         raise HostContractError(
-            "MemoryManager.initialize_all does not verifiably inject and "
-            "propagate hermes_home")
+            "MemoryManager.initialize_all does not verifiably propagate "
+            "hermes_home to an initialize() call")
 
     # G5: declared version == embedded plugin.yaml (BEFORE any write)
     declared_yaml = plugin_yaml_version()

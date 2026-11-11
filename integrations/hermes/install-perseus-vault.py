@@ -137,81 +137,93 @@ class HostContractError(RuntimeError):
 
 
 def _gate_proves_key_passed(fn_node, ast_mod, key: str) -> bool:
-    """True iff at least one real .initialize(...) call inside fn_node
-    passes `key` as an argument of the call itself:
+    """Conservative, SEQUENTIAL, single-scope proof that some real
+    .initialize(...) call inside fn_node receives `key`:
 
-      - a direct keyword  initialize(..., key=...), or
-      - a dict literal carrying the key, or
-      - **name unpacking where `name` provably carries the key inside
-        this function (d[key] = ..., d = {...key...}, alias of a proven
-        dict, or d.update({...key...})).
-
-    Fixed-point over assignments in this function only. Deterministic:
-    no text matching, no heuristics; unresolvable propagation is NOT
-    evidence, and references that never reach a call are not counted.
+    - Statements are visited in execution (source) order; `proven`
+      holds only the dicts known to carry the key AT THE PROGRAM
+      POINT OF THE CALL. An assignment AFTER a call is not evidence
+      for that call.
+    - Only this function's own executable scope is scanned: nested
+      def/async def/class bodies are skipped entirely - they may
+      never execute, so assignments inside them are not evidence.
+      Lambda expressions ARE scanned at their position: Hermes's
+      real iteration shape passes `lambda p: p.initialize(...)` to
+      a synchronous helper, and a lambda at this position executes
+      here; a lambda stored and invoked later with assignments
+      added in between is NOT provable and fails closed.
+    - Accepted assignment forms (the ones Hermes actually uses):
+      d[key] = ..., d = {...key...}, d = alias-of-proven,
+      d.update({...key...}). Anything else is not evidence: when
+      propagation cannot be demonstrated the call fails closed.
+    No full Python analyzer; deliberately conservative.
     """
     proven = set()
-    changed = True
-    while changed:
-        changed = False
-        for node in ast_mod.walk(fn_node):
-            if isinstance(node, ast_mod.Assign):
-                for t in node.targets:
-                    if (isinstance(t, ast_mod.Subscript)
-                            and isinstance(t.slice, ast_mod.Constant)
-                            and t.slice.value == key
-                            and isinstance(t.value, ast_mod.Name)):
-                        if t.value.id not in proven:
-                            proven.add(t.value.id)
-                            changed = True
-                    elif (isinstance(t, ast_mod.Name)
-                            and isinstance(node.value, ast_mod.Dict)):
-                        if any(isinstance(k, ast_mod.Constant)
-                               and k.value == key
-                               for k in node.value.keys):
-                            if t.id not in proven:
-                                proven.add(t.id)
-                                changed = True
-                    elif (isinstance(t, ast_mod.Name)
-                            and isinstance(node.value, ast_mod.Name)):
-                        if node.value.id in proven and t.id not in proven:
-                            proven.add(t.id)
-                            changed = True
-            elif (isinstance(node, ast_mod.Call)
-                    and isinstance(node.func, ast_mod.Attribute)
-                    and node.func.attr == "update"
-                    and isinstance(node.func.value, ast_mod.Name)):
-                tgt = node.func.value.id
-                if tgt in proven:
-                    continue
-                for a in node.args:
-                    if ((isinstance(a, ast_mod.Dict)
+
+    def note_assign(node):
+        for t in node.targets:
+            if (isinstance(t, ast_mod.Subscript)
+                    and isinstance(t.slice, ast_mod.Constant)
+                    and t.slice.value == key
+                    and isinstance(t.value, ast_mod.Name)):
+                proven.add(t.value.id)
+            elif (isinstance(t, ast_mod.Name)
+                    and isinstance(node.value, ast_mod.Dict)
+                    and any(isinstance(k, ast_mod.Constant)
+                            and k.value == key
+                            for k in node.value.keys)):
+                proven.add(t.id)
+            elif (isinstance(t, ast_mod.Name)
+                    and isinstance(node.value, ast_mod.Name)
+                    and node.value.id in proven):
+                proven.add(t.id)
+
+    def note_call(node):
+        if not isinstance(node.func, ast_mod.Attribute):
+            return False
+        if (node.func.attr == "update"
+                and isinstance(node.func.value, ast_mod.Name)):
+            tgt = node.func.value.id
+            for a in node.args:
+                if ((isinstance(a, ast_mod.Dict)
+                        and any(isinstance(k, ast_mod.Constant)
+                                and k.value == key for k in a.keys))
+                        or (isinstance(a, ast_mod.Name)
+                            and a.id in proven)):
+                    proven.add(tgt)
+        if node.func.attr == "initialize":
+            for kw in node.keywords:
+                if kw.arg == key:
+                    return True
+                if kw.arg is None:
+                    v = kw.value
+                    if isinstance(v, ast_mod.Name) and v.id in proven:
+                        return True
+                    if (isinstance(v, ast_mod.Dict)
                             and any(isinstance(k, ast_mod.Constant)
                                     and k.value == key
-                                    for k in a.keys))
-                            or (isinstance(a, ast_mod.Name)
-                                and a.id in proven)):
-                        proven.add(tgt)
-                        changed = True
-                        break
-    calls = [n for n in ast_mod.walk(fn_node)
-             if isinstance(n, ast_mod.Call)
-             and isinstance(n.func, ast_mod.Attribute)
-             and n.func.attr == "initialize"]
-    if not calls:
+                                    for k in v.keys)):
+                        return True
         return False
-    for c in calls:
-        for kw in c.keywords:
-            if kw.arg == key:
+
+    def scan(node):
+        if isinstance(node, (ast_mod.FunctionDef,
+                             ast_mod.AsyncFunctionDef,
+                             ast_mod.ClassDef)):
+            return False
+        if isinstance(node, ast_mod.Assign):
+            note_assign(node)
+        elif isinstance(node, ast_mod.Call):
+            if note_call(node):
                 return True
-            if kw.arg is None:
-                v = kw.value
-                if isinstance(v, ast_mod.Name) and v.id in proven:
-                    return True
-                if (isinstance(v, ast_mod.Dict)
-                        and any(isinstance(k, ast_mod.Constant)
-                                and k.value == key for k in v.keys)):
-                    return True
+        for child in ast_mod.iter_child_nodes(node):
+            if scan(child):
+                return True
+        return False
+
+    for stmt in fn_node.body:
+        if scan(stmt):
+            return True
     return False
 
 
@@ -267,6 +279,12 @@ def check_host_contract(host_root=None) -> str:
     seam — when set it is the ONLY considered root; failure never falls
     back to the real host. No other knobs, no permissive warnings.
     """
+    # The validation itself must be READ-ONLY with respect to the
+    # host: importing host modules must not write .pyc files into
+    # the host tree. Enforced internally, independent of any external
+    # PYTHONDONTWRITEBYTECODE setting.
+    sys.dont_write_bytecode = True
+
     override = (host_root or
                 os.environ.get("PERSEUS_GATE_HOST_ROOT", "")).strip()
     if override:

@@ -173,6 +173,40 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
                     '        for p in self._providers:\n'
                     '            p.initialize(session_id=session_id,\n'
                     '                         **{"other": "x"})\n')
+        elif mm_mode == "lateassign":
+            # CASE 1 from the review: the assignment is AFTER the call;
+            # at call time the key does not exist
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        cfg = {}\n'
+                    '        for p in self._providers:\n'
+                    '            p.initialize(session_id=session_id, **cfg)\n'
+                    '        cfg["hermes_home"] = "/stub"\n')
+        elif mm_mode == "nestedfn":
+            # CASE 2 from the review: the assignment lives in a nested
+            # function that never executes
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        cfg = {}\n'
+                    '        def prepare():\n'
+                    '            cfg["hermes_home"] = "/stub"\n'
+                    '        for p in self._providers:\n'
+                    '            p.initialize(session_id=session_id, **cfg)\n')
+        elif mm_mode == "inloop":
+            # real Hermes shape: assignment inside the loop body,
+            # BEFORE the call - must be accepted (guard against
+            # over-conservative rejection)
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        for p in self._providers:\n'
+                    '            kwargs["hermes_home"] = "/stub"\n'
+                    '            p.initialize(session_id=session_id, **kwargs)\n')
+        elif mm_mode == "eachprovider":
+            # mirrors the REAL Hermes 0.23.1 shape (guarded inject +
+            # lambda passed to a synchronous helper)
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        if "hermes_home" not in kwargs:\n'
+                    '            kwargs["hermes_home"] = "/stub"\n'
+                    '        self._each_provider("initialize failed",\n'
+                    '            lambda p: p.initialize(session_id=session_id,\n'
+                    '                                  **kwargs))\n')
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     '        kwargs["hermes_home"] = "/stub"\n'
@@ -270,20 +304,52 @@ def f6a(tmp):
     return True, ""
 
 
+def _pyc_index(root: Path):
+    idx = {}
+    for p in root.rglob("*.pyc"):
+        st = p.stat()
+        idx[str(p.relative_to(root))] = (st.st_size, st.st_mtime_ns)
+    return idx
+
+
 def f6b():
-    # gate function against the REAL installed host (read-only)
+    # gate function against the REAL installed host (read-only), and
+    # the gate's imports must not touch the host's bytecode caches:
+    # full .pyc index (size + mtime) identical across the run, with
+    # PYTHONDONTWRITEBYTECODE absent from the probe environment.
+    find_root = (
+        "import importlib.util;"
+        f"spec = importlib.util.spec_from_file_location('inst', {str(INSTALLER)!r});"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
+        "print(m._discover_host_root())")
+    env = dict(os.environ)
+    env.pop("PERSEUS_GATE_HOST_ROOT", None)
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    r0 = subprocess.run([sys.executable, "-c", find_root], env=env,
+                        capture_output=True, text=True, timeout=120)
+    if r0.returncode != 0:
+        return False, f"host root lookup failed: {r0.stderr[-300:]}"
+    root = Path(r0.stdout.strip())
+    before = _pyc_index(root)
     code = (
         "import importlib.util, sys;"
         f"spec = importlib.util.spec_from_file_location('inst', {str(INSTALLER)!r});"
         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
         "v = m.check_host_contract();"
         "print('GATE_OK', v)")
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                       text=True, timeout=180)
+    r = subprocess.run([sys.executable, "-c", code], env=env,
+                       capture_output=True, text=True, timeout=180)
+    after = _pyc_index(root)
     if r.returncode != 0 or "GATE_OK" not in r.stdout:
         return False, (r.stdout[-200:] + r.stderr[-400:])
     if "0.23.1" not in r.stdout:
         return False, f"unexpected version: {r.stdout}"
+    if before != after:
+        new = sorted(set(after) - set(before))
+        touched = sorted(k for k in set(before) & set(after)
+                         if before[k] != after[k])
+        return False, (f"gate touched host bytecode caches: new={new[:3]} "
+                       f"modified={touched[:3]}")
     return True, ""
 
 
@@ -324,19 +390,33 @@ def g4_suite(tmp):
     yield ("G4c local hermes_home not passed -> abort",
            lambda: expect_abort(tmp, "g4c", {"mm_mode": "unused"},
                                 "propagate"))
+    yield ("G4e assignment AFTER the call -> abort (execution order)",
+           lambda: expect_abort(tmp, "g4e", {"mm_mode": "lateassign"},
+                                "propagate"))
+    yield ("G4f assignment in never-run nested def -> abort (scope)",
+           lambda: expect_abort(tmp, "g4f", {"mm_mode": "nestedfn"},
+                                "propagate"))
+
+
+def g4_positive(tmp, mode, label_home):
+    # positive controls: both propagation forms Hermes uses, in the
+    # order Hermes uses them, must be ACCEPTED
+    home = tmp / f"{label_home}-home"
+    home.mkdir()
+    stub = make_stub(tmp / f"{label_home}-host", mm_mode=mode)
+    r = run_installer(home, gate_root=stub)
+    if not snapshot(home):
+        return False, (f"gate rejected valid {mode} propagation "
+                       f"(tail: {(r.stdout + r.stderr)[-200:]})")
+    return True, ""
 
 
 def g4d(tmp):
-    # positive control: direct hermes_home= keyword is a valid
-    # propagation form and must be ACCEPTED
-    home = tmp / "g4d-home"
-    home.mkdir()
-    stub = make_stub(tmp / "g4d-host", mm_mode="direct")
-    before = snapshot(home)
-    r = run_installer(home, gate_root=stub)
-    if not snapshot(home):
-        return False, ("gate rejected direct kwarg "
-                       f"(tail: {(r.stdout + r.stderr)[-200:]})")
+    for mode, label in (("direct", "g4d"), ("inloop", "g4g"),
+                        ("eachprovider", "g4h")):
+        ok, det = g4_positive(tmp, mode, label)
+        if not ok:
+            return ok, det
     return True, ""
 
 
@@ -424,6 +504,36 @@ def l3(tmp):
     return True, ""
 
 
+def gro(tmp):
+    # The gate's OWN validation must be read-only w.r.t. the host:
+    # importing host modules must not create __pycache__/.pyc inside
+    # the host root. Fresh stub host = no bytecode caches at all;
+    # the probe runs with PYTHONDONTWRITEBYTECODE EXPLICITLY ABSENT,
+    # so the guarantee must come from the gate itself.
+    host = make_stub(tmp / "gro-host")
+    probe = (
+        "import os, importlib.util;"
+        "assert 'PYTHONDONTWRITEBYTECODE' not in os.environ," \
+        " 'external setting leaked';"
+        f"spec = importlib.util.spec_from_file_location('inst', {str(INSTALLER)!r});"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m);"
+        "v = m.check_host_contract();"
+        "print('GATE_OK', v)")
+    env = dict(os.environ)
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    env["PERSEUS_GATE_HOST_ROOT"] = str(host)
+    before = snapshot(host)
+    r = subprocess.run([sys.executable, "-c", probe], env=env,
+                       capture_output=True, text=True, timeout=120)
+    after = snapshot(host)
+    if "GATE_OK" not in r.stdout:
+        return False, f"gate failed on valid stub: {(r.stdout + r.stderr)[-250:]}"
+    if after != before:
+        new = sorted(set(after) - set(before))
+        return False, f"gate wrote {len(new)} files into the host root: {new[:4]}"
+    return True, ""
+
+
 # ---------------------------------------------------------------------
 # SN: snapshot-mechanism self-check (test machinery, not installer
 # behavior): must be sensitive to chmod, symlink retargeting and new
@@ -433,7 +543,12 @@ def l3(tmp):
 def sn1(tmp):
     root = tmp / "sn1"
     root.mkdir()
+    # Both targets exist BEFORE the first snapshot: the symlink
+    # retarget check below then varies ONLY the link destination
+    # (same content on both files, so content hashing alone cannot
+    # be what detects the change).
     (root / "f.txt").write_text("a")
+    (root / "same.txt").write_text("a")
     (root / "d").mkdir()
     (root / "link").symlink_to(root / "f.txt")
     s1 = snapshot(root)
@@ -443,17 +558,18 @@ def sn1(tmp):
     if not any(v[0] == "DIR" for v in s1.values()):
         problems.append("directory not captured")
     (root / "f.txt").chmod(0o600)
-    if snapshot(root) == s1:
+    s2 = snapshot(root)
+    if s2 == s1:
         problems.append("chmod invisible to snapshot")
-    s1 = snapshot(root)
-    (root / "same.txt").write_text("a")
+    # only the symlink destination changes between s2 and s3
     (root / "link").unlink()
     (root / "link").symlink_to(root / "same.txt")
-    if snapshot(root) == s1:
+    s3 = snapshot(root)
+    if s3 == s2:
         problems.append("symlink retarget invisible (identical content)")
-    s1 = snapshot(root)
+    s4 = snapshot(root)
     (root / "newemptydir").mkdir()
-    if snapshot(root) == s1:
+    if snapshot(root) == s4:
         problems.append("new empty directory invisible")
     return (not problems), "; ".join(problems)
 
@@ -476,7 +592,11 @@ def main():
                 ok, det = False, f"unexpected: {type(e).__name__}: {e}"
             check(name, ok, det)
         ok, det = g4d(tmp)
-        check("G4d direct hermes_home kwarg -> accepted", ok, det)
+        check("G4d+G4g+G4h valid forms (direct kw, in-loop, real Hermes lambda shape) -> accepted",
+              ok, det)
+        ok, det = gro(tmp)
+        check("GRO gate imports write NO bytecode into the host root",
+              ok, det)
         for name, fn in (("L1 relative exec chain resolves via p.parent", l1),
                          ("L2 quoted exec + quote-joined path literal", l2),
                          ("L3 chain deeper than cap -> explicit abort", l3),

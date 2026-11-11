@@ -136,95 +136,177 @@ class HostContractError(RuntimeError):
     """The installed Hermes does not satisfy the integration contract."""
 
 
-def _gate_proves_key_passed(fn_node, ast_mod, key: str) -> bool:
-    """Conservative, SEQUENTIAL, single-scope proof that some real
-    .initialize(...) call inside fn_node receives `key`:
+def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
+    """Bounded RECOGNIZER of the Hermes 0.23.1 initialization shape -
+    not a general analyzer. Accepted structure (the installed host's,
+    element by element):
 
-    - Statements are visited in execution (source) order; `proven`
-      holds only the dicts known to carry the key AT THE PROGRAM
-      POINT OF THE CALL. An assignment AFTER a call is not evidence
-      for that call.
-    - Only this function's own executable scope is scanned: nested
-      def/async def/class bodies are skipped entirely - they may
-      never execute, so assignments inside them are not evidence.
-      Lambda expressions ARE scanned at their position: Hermes's
-      real iteration shape passes `lambda p: p.initialize(...)` to
-      a synchronous helper, and a lambda at this position executes
-      here; a lambda stored and invoked later with assignments
-      added in between is NOT provable and fails closed.
-    - Accepted assignment forms (the ones Hermes actually uses):
-      d[key] = ..., d = {...key...}, d = alias-of-proven,
-      d.update({...key...}). Anything else is not evidence: when
-      propagation cannot be demonstrated the call fails closed.
-    No full Python analyzer; deliberately conservative.
+        def initialize_all(self, session_id, **kwargs):
+            if key not in kwargs:          # exact membership guard
+                kwargs[key] = <any>        # single store, no else
+            ...no other store into kwargs, no rebinding or deletion
+               of kwargs or kwargs[key], no mutating call...
+            self._each_provider(<label>,
+                lambda p: <...>.initialize(..., **kwargs))
+
+    and MemoryManager._each_provider exists and INVOKES its callback
+    parameter directly in its own executable flow (the synchronous
+    helper Hermes actually uses); a helper that stores or rebinds the
+    callback is rejected. initialize() calls outside that callback,
+    unproven conditional branches, loop-only assignments, rebindings,
+    deletions, stored lambdas and any other structure fail closed.
     """
-    proven = set()
-
-    def note_assign(node):
-        for t in node.targets:
-            if (isinstance(t, ast_mod.Subscript)
-                    and isinstance(t.slice, ast_mod.Constant)
-                    and t.slice.value == key
-                    and isinstance(t.value, ast_mod.Name)):
-                proven.add(t.value.id)
-            elif (isinstance(t, ast_mod.Name)
-                    and isinstance(node.value, ast_mod.Dict)
-                    and any(isinstance(k, ast_mod.Constant)
-                            and k.value == key
-                            for k in node.value.keys)):
-                proven.add(t.id)
-            elif (isinstance(t, ast_mod.Name)
-                    and isinstance(node.value, ast_mod.Name)
-                    and node.value.id in proven):
-                proven.add(t.id)
-
-    def note_call(node):
-        if not isinstance(node.func, ast_mod.Attribute):
-            return False
-        if (node.func.attr == "update"
-                and isinstance(node.func.value, ast_mod.Name)):
-            tgt = node.func.value.id
-            for a in node.args:
-                if ((isinstance(a, ast_mod.Dict)
-                        and any(isinstance(k, ast_mod.Constant)
-                                and k.value == key for k in a.keys))
-                        or (isinstance(a, ast_mod.Name)
-                            and a.id in proven)):
-                    proven.add(tgt)
-        if node.func.attr == "initialize":
-            for kw in node.keywords:
-                if kw.arg == key:
-                    return True
-                if kw.arg is None:
-                    v = kw.value
-                    if isinstance(v, ast_mod.Name) and v.id in proven:
-                        return True
-                    if (isinstance(v, ast_mod.Dict)
-                            and any(isinstance(k, ast_mod.Constant)
-                                    and k.value == key
-                                    for k in v.keys)):
-                        return True
+    # 1. the **kwargs parameter name
+    pk = fn_node.args.kwarg.arg if fn_node.args.kwarg else None
+    if not pk:
         return False
 
-    def scan(node):
-        if isinstance(node, (ast_mod.FunctionDef,
-                             ast_mod.AsyncFunctionDef,
-                             ast_mod.ClassDef)):
-            return False
-        if isinstance(node, ast_mod.Assign):
-            note_assign(node)
-        elif isinstance(node, ast_mod.Call):
-            if note_call(node):
-                return True
-        for child in ast_mod.iter_child_nodes(node):
-            if scan(child):
-                return True
-        return False
+    def sub_store(node, name):
+        return (isinstance(node, ast_mod.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast_mod.Subscript)
+                and isinstance(node.targets[0].value, ast_mod.Name)
+                and node.targets[0].value.id == name
+                and isinstance(node.targets[0].slice, ast_mod.Constant)
+                and node.targets[0].slice.value == key)
 
-    for stmt in fn_node.body:
-        if scan(stmt):
+    # 2. exactly one exact membership guard, body = single store, no else
+    def guard_test(t):
+        comp = (isinstance(t, ast_mod.Compare) and len(t.ops) == 1
+                and isinstance(t.left, ast_mod.Constant)
+                and t.left.value == key
+                and isinstance(t.comparators[0], ast_mod.Name)
+                and t.comparators[0].id == pk)
+        if comp and isinstance(t.ops[0], ast_mod.NotIn):
             return True
-    return False
+        if (isinstance(t, ast_mod.UnaryOp)
+                and isinstance(t.op, ast_mod.Not)
+                and comp and isinstance(t.operand.ops[0], ast_mod.In)):
+            return True
+        return False
+
+    guards = [s for s in fn_node.body
+              if isinstance(s, ast_mod.If) and guard_test(s.test)]
+    if len(guards) != 1:
+        return False
+    g = guards[0]
+    # The real host's guard body is [inert import(s), one store]:
+    #   if key not in kwargs:
+    #       from hermes_constants import get_hermes_home
+    #       kwargs[key] = str(get_hermes_home())
+    # Imports bind names (a Store of the name kwargs would be caught
+    # below); anything else in the guard body fails closed.
+    stores = [s for s in g.body if sub_store(s, pk)]
+    inert = [s for s in g.body
+             if isinstance(s, (ast_mod.Import, ast_mod.ImportFrom))]
+    if g.orelse or len(stores) != 1 or len(g.body) != len(inert) + 1:
+        return False
+    g_store = stores[0]
+
+    # 3. nothing else may touch kwargs or kwargs[key]: any Store/Del of
+    #    the name, any other Subscript store into it, any deletion of
+    #    one of its entries, any mutating method call on it.
+    for n in ast_mod.walk(fn_node):
+        if isinstance(n, ast_mod.Name) and n.id == pk:
+            if isinstance(n.ctx, (ast_mod.Store, ast_mod.Del)):
+                return False
+        elif isinstance(n, ast_mod.Delete):
+            for t in n.targets:
+                if (isinstance(t, ast_mod.Subscript)
+                        and isinstance(t.value, ast_mod.Name)
+                        and t.value.id == pk):
+                    return False
+        elif isinstance(n, ast_mod.Assign):
+            for t in n.targets:
+                if (n is not g_store
+                        and isinstance(t, ast_mod.Subscript)
+                        and isinstance(t.value, ast_mod.Name)
+                        and t.value.id == pk):
+                    return False
+        elif (isinstance(n, ast_mod.Call)
+                and isinstance(n.func, ast_mod.Attribute)
+                and isinstance(n.func.value, ast_mod.Name)
+                and n.func.value.id == pk
+                and n.func.attr in ("clear", "pop", "popitem",
+                                    "update", "setdefault")):
+            return False
+
+    # 4. exactly one call to self._each_provider, carrying exactly one
+    #    positional lambda, at a positional index that maps to a
+    #    helper parameter.
+    helper_attr = "_each_provider"
+    hcs = [n for n in ast_mod.walk(fn_node)
+           if isinstance(n, ast_mod.Call)
+           and isinstance(n.func, ast_mod.Attribute)
+           and n.func.attr == helper_attr
+           and isinstance(n.func.value, ast_mod.Name)
+           and n.func.value.id == "self"]
+    if len(hcs) != 1:
+        return False
+    hc = hcs[0]
+    lambdas = [a for a in hc.args if isinstance(a, ast_mod.Lambda)]
+    if len(lambdas) != 1:
+        return False
+    cb = lambdas[0]
+    if any(a.arg == pk for a in cb.args.args):
+        return False
+
+    # 5. the initialize() call: present inside that callback unpacking
+    #    **kwargs, and NOT anywhere else in the function (alternative
+    #    unproven paths are rejected).
+    def find_inits(node):
+        return [m for m in ast_mod.walk(node)
+                if isinstance(m, ast_mod.Call)
+                and isinstance(m.func, ast_mod.Attribute)
+                and m.func.attr == "initialize"]
+
+    cb_inits = find_inits(cb)
+    if not cb_inits:
+        return False
+    total = []
+    for stmt in fn_node.body:
+        total.extend(find_inits(stmt))
+    if len(total) != len(cb_inits):
+        return False
+    if not any(any(kw.arg is None and isinstance(kw.value, ast_mod.Name)
+                    and kw.value.id == pk for kw in m.keywords)
+               for m in cb_inits):
+        return False
+
+    # 6. the helper must be the synchronous shape: it exists in the
+    #    class and invokes its callback parameter directly in its own
+    #    flow (never stores/rebinds it, never defers it to a nested
+    #    scope).
+    helper = next((f for f in cls_node.body
+                   if isinstance(f, ast_mod.FunctionDef)
+                   and f.name == helper_attr), None)
+    if helper is None:
+        return False
+    pos = helper.args.args
+    idx = hc.args.index(cb)
+    if idx + 1 >= len(pos):
+        return False
+    cb_param = pos[idx + 1].arg
+    invoked = [False]
+    stored = [False]
+
+    def scan_helper(node):
+        if (node is not helper and isinstance(
+                node, (ast_mod.FunctionDef, ast_mod.AsyncFunctionDef,
+                       ast_mod.Lambda, ast_mod.ClassDef))):
+            return
+        if (isinstance(node, ast_mod.Call)
+                and isinstance(node.func, ast_mod.Name)
+                and node.func.id == cb_param):
+            invoked[0] = True
+        if (isinstance(node, ast_mod.Name) and node.id == cb_param
+                and not isinstance(node.ctx, ast_mod.Load)):
+            stored[0] = True
+        for c in ast_mod.iter_child_nodes(node):
+            scan_helper(c)
+
+    scan_helper(helper)
+    return invoked[0] and not stored[0]
 
 
 def _discover_host_root() -> Path:
@@ -349,30 +431,32 @@ def check_host_contract(host_root=None) -> str:
                 f"on_session_switch parameter {_name!r} is not explicit "
                 f"in the installed host")
 
-    # G4: the real initialization call verifiably PROPAGATES
-    # hermes_home to the initialize() call itself. AST-scoped to
-    # MemoryManager.initialize_all; structural similarity (unparse +
-    # substring) is not evidence, and locals that never reach the call
-    # are not evidence. Propagation forms accepted exactly as Hermes
-    # expresses them: direct keyword or **dict carrying the key.
+    # G4: RECOGNITION of the exact Hermes 0.23.1 initialization
+    # shape (guarded inject + _each_provider callback with
+    # p.initialize(**kwargs), and a synchronously-invoking helper).
+    # Anything that is not this demonstrated structure fails closed;
+    # structural similarity or a plausible sequence is not evidence.
     try:
         tree = _ast.parse(
             (root / "agent" / "memory_manager.py").read_text(
                 encoding="utf-8"))
+        cls = next(
+            c for c in tree.body
+            if isinstance(c, _ast.ClassDef)
+            and c.name == "MemoryManager")
         init_fn = next(
-            fn for cls in tree.body
-            if isinstance(cls, _ast.ClassDef) and cls.name == "MemoryManager"
-            for fn in cls.body
+            fn for fn in cls.body
             if isinstance(fn, _ast.FunctionDef)
             and fn.name == "initialize_all")
     except Exception as e:
         raise HostContractError(
             f"initialization contract not verifiable "
             f"(MemoryManager.initialize_all): {e}")
-    if not _gate_proves_key_passed(init_fn, _ast, "hermes_home"):
+    if not _gate_proves_key_passed(init_fn, cls, _ast, "hermes_home"):
         raise HostContractError(
-            "MemoryManager.initialize_all does not verifiably propagate "
-            "hermes_home to an initialize() call")
+            "MemoryManager.initialize_all does not match the verified "
+            "Hermes 0.23.1 shape that propagates hermes_home to an "
+            "initialize() call")
 
     # G5: declared version == embedded plugin.yaml (BEFORE any write)
     declared_yaml = plugin_yaml_version()

@@ -148,69 +148,94 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
     (ag / "memory_provider.py").write_text("".join(mp))
     if mm_exists:
         if mm_mode is None:
-            mm_mode = "kwargs" if mm_home else "wrongkey"
-        if mm_mode == "kwargs":
+            mm_mode = "real" if mm_home else "wrongkey"
+        helper = ('    def _each_provider(self, label, call):\n'
+                  '        for provider in self._providers:\n'
+                  '            try:\n'
+                  '                call(provider)\n'
+                  '            except Exception:\n'
+                  '                pass\n')
+        helper_store = ('    def _each_provider(self, label, call):\n'
+                        '        self._pending = call\n')
+        guard = ('        if "hermes_home" not in kwargs:\n'
+                 '            from hermes_constants_stub import get_hermes_home\n'
+                 '            kwargs["hermes_home"] = "/stub"\n')
+        call_cb = ('        self._each_provider("initialize failed",\n'
+                   '            lambda p: p.initialize(session_id=session_id,\n'
+                   '                                  **kwargs))\n')
+        if mm_mode == "real":
+            # exact Hermes 0.23.1 shape (positive control)
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
-                    '        kwargs["hermes_home"] = "/stub"\n'
-                    '        for p in self._providers:\n'
-                    '            p.initialize(session_id=session_id, **kwargs)\n')
-        elif mm_mode == "direct":
-            body = ('    def initialize_all(self, session_id, **kwargs):\n'
-                    '        for p in self._providers:\n'
-                    '            p.initialize(session_id=session_id,\n'
-                    '                         hermes_home="/stub", **kwargs)\n')
+                    + guard + call_cb) + helper
         elif mm_mode == "wrongkey":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
-                    '        kwargs["hermes_dir"] = "/stub"\n'
-                    '        for p in self._providers:\n'
-                    '            p.initialize(session_id=session_id, **kwargs)\n')
+                    '        if "hermes_dir" not in kwargs:\n'
+                    '            kwargs["hermes_dir"] = "/stub"\n'
+                    + call_cb) + helper
         elif mm_mode == "unused":
-            # key appears in a local dict that never reaches the call:
-            # structurally similar, but NOT propagation
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     '        cfg = {"hermes_home": "/stub"}\n'
-                    '        kwargs["other"] = "x"\n'
                     '        for p in self._providers:\n'
-                    '            p.initialize(session_id=session_id,\n'
-                    '                         **{"other": "x"})\n')
+                    '            p.initialize(session_id=session_id, **cfg)\n')
         elif mm_mode == "lateassign":
-            # CASE 1 from the review: the assignment is AFTER the call;
-            # at call time the key does not exist
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     '        cfg = {}\n'
                     '        for p in self._providers:\n'
                     '            p.initialize(session_id=session_id, **cfg)\n'
                     '        cfg["hermes_home"] = "/stub"\n')
         elif mm_mode == "nestedfn":
-            # CASE 2 from the review: the assignment lives in a nested
-            # function that never executes
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     '        cfg = {}\n'
                     '        def prepare():\n'
                     '            cfg["hermes_home"] = "/stub"\n'
                     '        for p in self._providers:\n'
                     '            p.initialize(session_id=session_id, **cfg)\n')
-        elif mm_mode == "inloop":
-            # real Hermes shape: assignment inside the loop body,
-            # BEFORE the call - must be accepted (guard against
-            # over-conservative rejection)
+        elif mm_mode == "iffalse":
+            # negative-table row 1: assignment under `if False`
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        if False:\n'
+                    '            kwargs["hermes_home"] = "/stub"\n'
                     '        for p in self._providers:\n'
-                    '            kwargs["hermes_home"] = "/stub"\n'
                     '            p.initialize(session_id=session_id, **kwargs)\n')
-        elif mm_mode == "eachprovider":
-            # mirrors the REAL Hermes 0.23.1 shape (guarded inject +
-            # lambda passed to a synchronous helper)
+        elif mm_mode == "condflag":
+            # negative-table row 2: assignment in an unguaranteed
+            # conditional branch (guard is not key-membership)
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
-                    '        if "hermes_home" not in kwargs:\n'
+                    '        if self.inject_home:\n'
                     '            kwargs["hermes_home"] = "/stub"\n'
-                    '        self._each_provider("initialize failed",\n'
-                    '            lambda p: p.initialize(session_id=session_id,\n'
-                    '                                  **kwargs))\n')
+                    + call_cb) + helper
+        elif mm_mode == "loopout":
+            # negative-table row 3: assignment inside a loop, call
+            # outside the loop (loop may not execute)
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        for _ in ():\n'
+                    '            kwargs["hermes_home"] = "/stub"\n'
+                    + call_cb) + helper
+        elif mm_mode == "reassign":
+            # negative-table row 4: dict rebound without the key
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + '        kwargs = {}\n' + call_cb) + helper
+        elif mm_mode == "deletion":
+            # negative-table row 5: del kwargs[key] before the call
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + '        del kwargs["hermes_home"]\n'
+                    + call_cb) + helper
+        elif mm_mode == "lambdastored":
+            # negative-table row 6: lambda stored, never passed to
+            # _each_provider
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        cb = lambda p: p.initialize(session_id'
+                    '=session_id, **kwargs)\n'
+                    '        self._add_provider_cb(cb)\n') + helper
+        elif mm_mode == "badsync":
+            # helper exists but STORES the callback instead of
+            # invoking it synchronously
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb) + helper_store
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
-                    '        kwargs["hermes_home"] = "/stub"\n'
-                    '        self._ready = True\n')
+                    + guard + '        self._ready = True\n') + helper
         else:
             raise ValueError(f"unknown mm_mode {mm_mode!r}")
         (ag / "memory_manager.py").write_text(
@@ -383,41 +408,59 @@ def f7(tmp):
 def g4_suite(tmp):
     yield ("G4a no initialize() call -> abort",
            lambda: expect_abort(tmp, "g4a", {"mm_mode": "nocall"},
-                                "propagate"))
+                                "propagates"))
     yield ("G4b key never reaches the call -> abort",
            lambda: expect_abort(tmp, "g4b", {"mm_mode": "wrongkey"},
-                                "propagate"))
+                                "propagates"))
     yield ("G4c local hermes_home not passed -> abort",
            lambda: expect_abort(tmp, "g4c", {"mm_mode": "unused"},
-                                "propagate"))
+                                "propagates"))
     yield ("G4e assignment AFTER the call -> abort (execution order)",
            lambda: expect_abort(tmp, "g4e", {"mm_mode": "lateassign"},
-                                "propagate"))
+                                "propagates"))
     yield ("G4f assignment in never-run nested def -> abort (scope)",
            lambda: expect_abort(tmp, "g4f", {"mm_mode": "nestedfn"},
-                                "propagate"))
+                                "propagates"))
+    # minimum negative table from the review:
+    yield ("G4n1 assignment under if False -> abort",
+           lambda: expect_abort(tmp, "g4n1", {"mm_mode": "iffalse"},
+                                "propagates"))
+    yield ("G4n2 unguaranteed conditional branch -> abort",
+           lambda: expect_abort(tmp, "g4n2", {"mm_mode": "condflag"},
+                                "propagates"))
+    yield ("G4n3 loop-only assignment, call outside loop -> abort",
+           lambda: expect_abort(tmp, "g4n3", {"mm_mode": "loopout"},
+                                "propagates"))
+    yield ("G4n4 dict rebound without the key -> abort",
+           lambda: expect_abort(tmp, "g4n4", {"mm_mode": "reassign"},
+                                "propagates"))
+    yield ("G4n5 del kwargs[key] before the call -> abort",
+           lambda: expect_abort(tmp, "g4n5", {"mm_mode": "deletion"},
+                                "propagates"))
+    yield ("G4n6 lambda stored, not executed by _each_provider -> abort",
+           lambda: expect_abort(tmp, "g4n6", {"mm_mode": "lambdastored"},
+                                "propagates"))
+    yield ("G4n7 helper stores callback (not synchronous) -> abort",
+           lambda: expect_abort(tmp, "g4n7", {"mm_mode": "badsync"},
+                                "propagates"))
 
 
 def g4_positive(tmp, mode, label_home):
-    # positive controls: both propagation forms Hermes uses, in the
-    # order Hermes uses them, must be ACCEPTED
+    # positive control: the EXACT Hermes 0.23.1 structure must be
+    # accepted (stub mirror); the real installed host is verified
+    # separately by F6b.
     home = tmp / f"{label_home}-home"
     home.mkdir()
     stub = make_stub(tmp / f"{label_home}-host", mm_mode=mode)
     r = run_installer(home, gate_root=stub)
     if not snapshot(home):
-        return False, (f"gate rejected valid {mode} propagation "
+        return False, (f"gate rejected real-shape mirror {mode} "
                        f"(tail: {(r.stdout + r.stderr)[-200:]})")
     return True, ""
 
 
 def g4d(tmp):
-    for mode, label in (("direct", "g4d"), ("inloop", "g4g"),
-                        ("eachprovider", "g4h")):
-        ok, det = g4_positive(tmp, mode, label)
-        if not ok:
-            return ok, det
-    return True, ""
+    return g4_positive(tmp, "real", "g4h")
 
 
 # ---------------------------------------------------------------------
@@ -592,7 +635,7 @@ def main():
                 ok, det = False, f"unexpected: {type(e).__name__}: {e}"
             check(name, ok, det)
         ok, det = g4d(tmp)
-        check("G4d+G4g+G4h valid forms (direct kw, in-loop, real Hermes lambda shape) -> accepted",
+        check("G4h exact Hermes 0.23.1 real shape (mirror) -> accepted",
               ok, det)
         ok, det = gro(tmp)
         check("GRO gate imports write NO bytecode into the host root",

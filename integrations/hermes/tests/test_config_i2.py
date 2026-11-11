@@ -12,10 +12,10 @@ Contract under test:
   - Secrets never appear in plaintext output (D10): memory status shows
     set/MISSING only; config show excludes api_key.
 
-E2 is intentionally RED against the current provider: save_config
-rewrites the JSON without preserving the legacy api_key. It exists to
-DEMONSTRATE the provider dependency, so the patch can be approved on
-evidence instead of argument. All other cases must pass.
+E2 first ran RED against the frozen I1 provider to demonstrate the
+provider dependency; the approved save_config patch (guarantees D9-D11)
+now makes it green, covering: existing token, absent token, empty
+values, core write failure, corrupt file, and no secret leakage.
 
 Standalone: python3 integrations/hermes/tests/test_config_i2.py
 """
@@ -126,32 +126,102 @@ def e1(installer_mod):
 
 
 # ----------------------------------------------------------------------
-# E2 — provider save_config must preserve legacy api_key (RED expected)
+# E2 — panel save_config: full D9 matrix from the approved patch
+# (existing token, absent token, empty value, core write failure,
+# no secret leakage)
 # ----------------------------------------------------------------------
 
 def e2(provider_mod):
+    problems = []
+    p = provider_mod.create_provider()
     with tempfile.TemporaryDirectory() as td:
         cfg = Path(td) / "perseus-vault.json"
+
+        # (a) existing legacy token: preserved byte-for-value; panel
+        # secret never enters the JSON or .env; .env untouched.
+        env = Path(td) / ".env"
+        env.write_text("PERSEUS_VAULT_MCP_TOKEN=[REDACTED-existing]\n")
+        env_before = env.read_text()
         cfg.write_text(json.dumps(
             {"url": "http://old/message", "api_key": "[REDACTED-legacy]"}))
-        p = provider_mod.create_provider()
         p.save_config({"url": "http://panel/message",
                        "workspace_hash": "ws-panel",
                        "token": "SECRET-FROM-PANEL"}, td)
-        on_disk = json.loads(cfg.read_text())
-        problems = []
+        blob = cfg.read_text()
+        on_disk = json.loads(blob)
         if on_disk.get("api_key") != "[REDACTED-legacy]":
-            problems.append("D9 violated: save_config dropped legacy api_key")
-        if "token" in on_disk or "SECRET-FROM-PANEL" in cfg.read_text():
-            problems.append("secret from panel written into JSON")
+            problems.append("(a) legacy api_key dropped")
+        if "SECRET-FROM-PANEL" in blob or "token" in on_disk:
+            problems.append("(a) panel secret reached the JSON")
+        if "SECRET-FROM-PANEL" in env.read_text() or env.read_text() != env_before:
+            problems.append("(a) save_config touched .env")
         if on_disk.get("url") != "http://panel/message":
-            problems.append("panel url not saved")
+            problems.append("(a) explicit url not applied")
         if oct(cfg.stat().st_mode)[-3:] != "600":
-            problems.append("mode not 600")
-        if problems:
-            return False, ("(expected-red: demonstrates the provider "
-                           "dependency for D9) " + "; ".join(problems))
-        return True, ""
+            problems.append("(a) mode not 600")
+
+        # (b) absent token in values: no token written anywhere; legacy
+        # still present.
+        p.save_config({"url": "http://panel2/message"}, td)
+        on_disk = json.loads(cfg.read_text())
+        if on_disk.get("api_key") != "[REDACTED-legacy]":
+            problems.append("(b) legacy api_key dropped with token absent")
+        if any("token" in k.lower() for k in on_disk):
+            problems.append("(b) a token key appeared in JSON")
+        if on_disk.get("workspace_hash") != "ws-panel":
+            problems.append("(b) workspace dropped when not provided")
+
+        # (c) empty values: never overwrite existing entries. url empty
+        # must keep the previous url. Explicit workspace "" is honored
+        # (means global).
+        p.save_config({"url": "", "workspace_hash": ""}, td)
+        on_disk = json.loads(cfg.read_text())
+        if on_disk.get("url") != "http://panel2/message":
+            problems.append("(c) empty url overwrote existing url")
+        if on_disk.get("workspace_hash") != "":
+            problems.append("(c) explicit empty workspace not honored")
+        if on_disk.get("api_key") != "[REDACTED-legacy]":
+            problems.append("(c) legacy api_key dropped on empty values")
+
+        # (d) write failure: raise explicitly, original file intact,
+        # message free of secrets.
+        ro_dir = Path(td) / "ro"
+        ro_dir.mkdir()
+        (ro_dir / "perseus-vault.json").write_text(
+            json.dumps({"url": "http://keep", "api_key": "[REDACTED-legacy]"}))
+        before = (ro_dir / "perseus-vault.json").read_text()
+        ro_dir.chmod(0o500)
+        raised = None
+        try:
+            p.save_config({"url": "http://fail"}, str(ro_dir))
+        except RuntimeError as e:
+            raised = str(e)
+        ro_dir.chmod(0o700)
+        if raised is None:
+            problems.append("(d) unwritable config returned silent success")
+        else:
+            if "REDACTED-legacy" in raised or "SECRET" in raised:
+                problems.append("(d) error message leaked a secret")
+        if (ro_dir / "perseus-vault.json").read_text() != before:
+            problems.append("(d) failed write damaged the original file")
+
+        # (e) corrupt existing file: refuse to rewrite, explicit error,
+        # bytes preserved (no alternative write).
+        bad = Path(td) / "bad"
+        bad.mkdir()
+        (bad / "perseus-vault.json").write_text("{not json")
+        raised2 = None
+        try:
+            p.save_config({"url": "http://x"}, str(bad))
+        except RuntimeError as e:
+            raised2 = str(e)
+        if raised2 is None:
+            problems.append("(e) corrupt file silently rewritten")
+        if (bad / "perseus-vault.json").read_text() != "{not json":
+            problems.append("(e) corrupt file bytes changed")
+    if problems:
+        return False, "; ".join(problems)
+    return True, ""
 
 
 # ----------------------------------------------------------------------
@@ -278,8 +348,7 @@ def main():
     check("E1 installer update preserves legacy/unknown keys", ok, det)
     with contextlib.redirect_stdout(io.StringIO()):
         ok, det = e2(prov)
-    check("E2 panel save_config preserves legacy api_key (RED expected)",
-          ok, det)
+    check("E2 panel save_config: full D9 matrix", ok, det)
     with contextlib.redirect_stdout(io.StringIO()):
         ok, det = e3(imod)
     check("E3 .env bootstrap never overwrites existing token", ok, det)

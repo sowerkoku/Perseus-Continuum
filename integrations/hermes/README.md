@@ -333,9 +333,34 @@ The provider resolves config in this order: **env vars → config.yaml
 2. `hermes plugins enable perseus-vault`
 3. Writes `PERSEUS_VAULT_MCP_TOKEN=…` to `$HERMES_HOME/.env` (mode 600,
    existing `.env` backed up; skipped if already set)
-4. Writes non-secret config to `$HERMES_HOME/perseus-vault.json` (mode 600)
+4. Updates `$HERMES_HOME/perseus-vault.json` (mode 600) by **merge**:
+   existing file backed up first; keys this installer does not own
+   (legacy `api_key`, unknown future keys) are never removed.
 5. `hermes config set memory.provider perseus-vault`
 6. Verifies with `hermes memory status`
+
+## Configuration and token contract
+
+Single source of truth for the bearer token: **core → `.env`**
+(`PERSEUS_VAULT_MCP_TOKEN`).
+
+- `api_key` in `perseus-vault.json` is **read-only legacy**: kept as a
+  fallback for older installs, never written nor removed by the
+  installer, the panel, or the provider.
+- The Desktop panel / `hermes memory` setup manages the token through
+  the core mechanism, which writes `.env`. The provider's
+  `save_config()` never persists secrets and never writes a token.
+- No update — installer or panel — overwrites or deletes an existing
+  token due to a missing, empty, or incomplete value.
+- Secrets are never printed: `hermes memory status` shows `set` /
+  `MISSING`; `cli.py config` excludes `api_key`.
+- A failed config write raises an explicit error through the host
+  (setup wizard prints it; the dashboard surfaces it); there is no
+  silent success and no alternative write path.
+
+Resolution precedence: core config section → `perseus-vault.json` →
+environment (`.env`) — so when both exist, the core token wins.
+Enforced by `tests/test_config_i2.py` (Suite E).
 
 ## Post-Install Verification
 

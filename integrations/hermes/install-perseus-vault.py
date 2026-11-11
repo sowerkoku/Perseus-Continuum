@@ -2703,15 +2703,58 @@ class PerseusVaultProvider(MemoryProvider):
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
-        """Persist non-secret config to $HERMES_HOME/perseus-vault.json."""
+        """Persist non-secret config to $HERMES_HOME/perseus-vault.json.
+
+        I2 contract (D3, guarantees D9-D11):
+        - api_key is read-only legacy: never written here, never removed;
+          an existing value survives any update byte-for-value.
+        - Secrets (schema key 'token') are NEVER persisted by this
+          method; the core mechanism alone writes them to .env.
+        - A missing or empty value NEVER overwrites or deletes an
+          existing entry. url: only an explicit non-empty value updates
+          it. workspace_hash: updated only when the key is explicitly
+          present in values ("" intentionally means global).
+        - A failed write RAISES: the host (memory_setup / dashboard)
+          reports the explicit error. No silent success, no alternative
+          write path, and no secret in the message.
+        """
+        path = Path(hermes_home) / "perseus-vault.json"
+        data: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text())
+                if isinstance(loaded, dict):
+                    data = loaded
+            except Exception as e:
+                # corrupt existing file: refuse to rewrite over it
+                raise RuntimeError(
+                    "perseus-vault: existing perseus-vault.json is "
+                    f"unreadable ({e.__class__.__name__}); refusing to "
+                    "rewrite it") from e
+        v = values if isinstance(values, dict) else {}
+        url = str(v.get("url") or "").strip()
+        if url:
+            data["url"] = url
+        elif "url" not in data:
+            data["url"] = _DEFAULT_URL
+        if "workspace_hash" in v:
+            data["workspace_hash"] = str(v.get("workspace_hash") or "")
+        # 'token' and any secret keys from the panel are deliberately
+        # ignored: never added, never replace api_key (single write
+        # source for tokens is core -> .env).
+        tmp = path.with_name(path.name + ".tmp")
         try:
-            path = Path(hermes_home) / "perseus-vault.json"
-            data = {"url": values.get("url") or _DEFAULT_URL,
-                    "workspace_hash": values.get("workspace_hash", "")}
-            path.write_text(json.dumps(data, indent=2))
-            path.chmod(0o600)
-        except Exception as e:
-            logger.warning("perseus-vault: save_config failed: %s", e)
+            tmp.write_text(json.dumps(data, indent=2))
+            tmp.chmod(0o600)
+            os.replace(tmp, path)
+        except OSError as e:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"perseus-vault: config write failed ({e.__class__.__name__})"
+                ) from e
 
     def backup_paths(self) -> List[str]:
         return [

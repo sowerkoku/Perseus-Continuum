@@ -137,26 +137,35 @@ class HostContractError(RuntimeError):
 
 
 def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
-    """Bounded RECOGNIZER of the Hermes 0.23.1 initialization shape -
-    not a general analyzer. Accepted structure (the installed host's,
-    element by element):
+    """Bounded RECOGNIZER of the Hermes 0.23.1 initialization shape.
+    Every property below maps to an observed fact of the installed
+    host; anything not matching fails closed. This is not a general
+    analyzer.
 
-        def initialize_all(self, session_id, **kwargs):
-            if key not in kwargs:          # exact membership guard
-                kwargs[key] = <any>        # single store, no else
-            ...no other store into kwargs, no rebinding or deletion
-               of kwargs or kwargs[key], no mutating call...
-            self._each_provider(<label>,
-                lambda p: <...>.initialize(..., **kwargs))
-
-    and MemoryManager._each_provider exists and INVOKES its callback
-    parameter directly in its own executable flow (the synchronous
-    helper Hermes actually uses); a helper that stores or rebinds the
-    callback is rejected. initialize() calls outside that callback,
-    unproven conditional branches, loop-only assignments, rebindings,
-    deletions, stored lambdas and any other structure fail closed.
+    1. Exactly one membership guard 'if key not in kwargs:' as a
+       TOP-LEVEL statement; body = inert imports plus exactly one
+       store kwargs[key]; no else. The guard PRECEDES any use of
+       kwargs and PRECEDES the helper call (statement order).
+    2. Nothing may mutate kwargs: any Store/Del of the name, any
+       Subscript store, any entry deletion, and any attribute call
+       on it other than the observed read '.get' - including
+       __setitem__/__delitem__ - is rejected.
+    3. Exactly one self._each_provider(...) call, located directly
+       in the top-level statement flow of initialize_all - not
+       inside nested defs, lambdas, conditionals, loops or
+       try/with bodies. It carries exactly one positional lambda,
+       at the helper's callback-parameter position.
+    4. That lambda contains EXACTLY ONE initialize() call, whose
+       receiver is the lambda's own first parameter, unpacking
+       **kwargs. No initialize() exists anywhere else in the
+       function.
+    5. MemoryManager._each_provider matches the installed
+       synchronous shape: a top-level for-loop in the helper body
+       whose executable flow calls call(<loop variable>) directly;
+       the callback parameter is never stored or rebound. A call
+       found only under an unprovable branch or outside the loop
+       is not evidence.
     """
-    # 1. the **kwargs parameter name
     pk = fn_node.args.kwarg.arg if fn_node.args.kwarg else None
     if not pk:
         return False
@@ -170,7 +179,6 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
                 and isinstance(node.targets[0].slice, ast_mod.Constant)
                 and node.targets[0].slice.value == key)
 
-    # 2. exactly one exact membership guard, body = single store, no else
     def guard_test(t):
         comp = (isinstance(t, ast_mod.Compare) and len(t.ops) == 1
                 and isinstance(t.left, ast_mod.Constant)
@@ -185,27 +193,28 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
             return True
         return False
 
+    # 1. unique top-level guard, inert imports + one store, no else
     guards = [s for s in fn_node.body
               if isinstance(s, ast_mod.If) and guard_test(s.test)]
     if len(guards) != 1:
         return False
     g = guards[0]
-    # The real host's guard body is [inert import(s), one store]:
-    #   if key not in kwargs:
-    #       from hermes_constants import get_hermes_home
-    #       kwargs[key] = str(get_hermes_home())
-    # Imports bind names (a Store of the name kwargs would be caught
-    # below); anything else in the guard body fails closed.
     stores = [s for s in g.body if sub_store(s, pk)]
     inert = [s for s in g.body
              if isinstance(s, (ast_mod.Import, ast_mod.ImportFrom))]
     if g.orelse or len(stores) != 1 or len(g.body) != len(inert) + 1:
         return False
     g_store = stores[0]
+    guard_idx = fn_node.body.index(g)
 
-    # 3. nothing else may touch kwargs or kwargs[key]: any Store/Del of
-    #    the name, any other Subscript store into it, any deletion of
-    #    one of its entries, any mutating method call on it.
+    # 1b. no use of kwargs before the guard (key not yet guaranteed)
+    for stmt in fn_node.body[:guard_idx]:
+        for n in ast_mod.walk(stmt):
+            if isinstance(n, ast_mod.Name) and n.id == pk:
+                return False
+
+    # 2. whitelist of kwargs operations: reads (Subscript Load and
+    #    .get) only; every other write/mutation fails closed.
     for n in ast_mod.walk(fn_node):
         if isinstance(n, ast_mod.Name) and n.id == pk:
             if isinstance(n.ctx, (ast_mod.Store, ast_mod.Del)):
@@ -216,8 +225,11 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
                         and isinstance(t.value, ast_mod.Name)
                         and t.value.id == pk):
                     return False
-        elif isinstance(n, ast_mod.Assign):
-            for t in n.targets:
+        elif isinstance(n, (ast_mod.Assign, ast_mod.AugAssign,
+                            ast_mod.AnnAssign)):
+            targets = (n.targets if isinstance(n, ast_mod.Assign)
+                       else [n.target])
+            for t in targets:
                 if (n is not g_store
                         and isinstance(t, ast_mod.Subscript)
                         and isinstance(t.value, ast_mod.Name)
@@ -227,33 +239,46 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
                 and isinstance(n.func, ast_mod.Attribute)
                 and isinstance(n.func.value, ast_mod.Name)
                 and n.func.value.id == pk
-                and n.func.attr in ("clear", "pop", "popitem",
-                                    "update", "setdefault")):
+                and n.func.attr != "get"):
             return False
 
-    # 4. exactly one call to self._each_provider, carrying exactly one
-    #    positional lambda, at a positional index that maps to a
-    #    helper parameter.
+    # 3. helper call only from top-level statement flow (never
+    #    inside compound statements or nested scopes), ordered
+    #    after the guard.
+    compound = tuple(
+        x for x in (getattr(ast_mod, name, None) for name in
+                    ("If", "For", "AsyncFor", "While", "Try", "TryStar",
+                     "With", "AsyncWith", "Match", "FunctionDef",
+                     "AsyncFunctionDef", "ClassDef")) if x is not None)
     helper_attr = "_each_provider"
-    hcs = [n for n in ast_mod.walk(fn_node)
-           if isinstance(n, ast_mod.Call)
-           and isinstance(n.func, ast_mod.Attribute)
-           and n.func.attr == helper_attr
-           and isinstance(n.func.value, ast_mod.Name)
-           and n.func.value.id == "self"]
+    hcs = []
+    for i, stmt in enumerate(fn_node.body):
+        if isinstance(stmt, compound):
+            continue
+        for n in ast_mod.walk(stmt):
+            if (isinstance(n, ast_mod.Call)
+                    and isinstance(n.func, ast_mod.Attribute)
+                    and n.func.attr == helper_attr
+                    and isinstance(n.func.value, ast_mod.Name)
+                    and n.func.value.id == "self"):
+                hcs.append((i, n))
     if len(hcs) != 1:
         return False
-    hc = hcs[0]
+    helper_idx, hc = hcs[0]
+    if guard_idx >= helper_idx:
+        return False
     lambdas = [a for a in hc.args if isinstance(a, ast_mod.Lambda)]
     if len(lambdas) != 1:
         return False
     cb = lambdas[0]
     if any(a.arg == pk for a in cb.args.args):
         return False
+    if not cb.args.args:
+        return False
+    lp = cb.args.args[0].arg
 
-    # 5. the initialize() call: present inside that callback unpacking
-    #    **kwargs, and NOT anywhere else in the function (alternative
-    #    unproven paths are rejected).
+    # 4. exactly one initialize() inside the callback, received by
+    #    the lambda parameter, unpacking **kwargs; none elsewhere.
     def find_inits(node):
         return [m for m in ast_mod.walk(node)
                 if isinstance(m, ast_mod.Call)
@@ -261,22 +286,24 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
                 and m.func.attr == "initialize"]
 
     cb_inits = find_inits(cb)
-    if not cb_inits:
+    if len(cb_inits) != 1:
         return False
     total = []
     for stmt in fn_node.body:
         total.extend(find_inits(stmt))
-    if len(total) != len(cb_inits):
+    if len(total) != 1:
         return False
-    if not any(any(kw.arg is None and isinstance(kw.value, ast_mod.Name)
-                    and kw.value.id == pk for kw in m.keywords)
-               for m in cb_inits):
+    m0 = cb_inits[0]
+    if not (isinstance(m0.func.value, ast_mod.Name)
+            and m0.func.value.id == lp):
+        return False
+    if not any(kw.arg is None and isinstance(kw.value, ast_mod.Name)
+               and kw.value.id == pk for kw in m0.keywords):
         return False
 
-    # 6. the helper must be the synchronous shape: it exists in the
-    #    class and invokes its callback parameter directly in its own
-    #    flow (never stores/rebinds it, never defers it to a nested
-    #    scope).
+    # 5. the helper must be the installed synchronous shape:
+    #    top-level for-loop calling cb_param(<loop var>) directly;
+    #    the callback parameter never stored or rebound.
     helper = next((f for f in cls_node.body
                    if isinstance(f, ast_mod.FunctionDef)
                    and f.name == helper_attr), None)
@@ -287,26 +314,33 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
     if idx + 1 >= len(pos):
         return False
     cb_param = pos[idx + 1].arg
+    for n in ast_mod.walk(helper):
+        if (isinstance(n, ast_mod.Name) and n.id == cb_param
+                and not isinstance(n.ctx, ast_mod.Load)):
+            return False
     invoked = [False]
-    stored = [False]
 
-    def scan_helper(node):
-        if (node is not helper and isinstance(
-                node, (ast_mod.FunctionDef, ast_mod.AsyncFunctionDef,
-                       ast_mod.Lambda, ast_mod.ClassDef))):
+    def scan_flow(node, loopvar):
+        if isinstance(node, (ast_mod.FunctionDef,
+                             ast_mod.AsyncFunctionDef,
+                             ast_mod.Lambda, ast_mod.ClassDef)):
             return
         if (isinstance(node, ast_mod.Call)
                 and isinstance(node.func, ast_mod.Name)
-                and node.func.id == cb_param):
+                and node.func.id == cb_param
+                and any(isinstance(a, ast_mod.Name)
+                        and a.id == loopvar for a in node.args)):
             invoked[0] = True
-        if (isinstance(node, ast_mod.Name) and node.id == cb_param
-                and not isinstance(node.ctx, ast_mod.Load)):
-            stored[0] = True
         for c in ast_mod.iter_child_nodes(node):
-            scan_helper(c)
+            scan_flow(c, loopvar)
 
-    scan_helper(helper)
-    return invoked[0] and not stored[0]
+    for s in helper.body:
+        if isinstance(s, (ast_mod.For, ast_mod.AsyncFor)):
+            if not isinstance(s.target, ast_mod.Name):
+                continue
+            for stmt in s.body:
+                scan_flow(stmt, s.target.id)
+    return invoked[0]
 
 
 def _discover_host_root() -> Path:

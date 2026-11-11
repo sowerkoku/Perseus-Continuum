@@ -233,6 +233,51 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
             # invoking it synchronously
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + call_cb) + helper_store
+        elif mm_mode == "guardlate":
+            # negative (review 4, defect 1): guard AFTER the helper call
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + call_cb + guard) + helper
+        elif mm_mode == "helperdef":
+            # negative (defect 2): helper call inside a nested def
+            # that is never invoked
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        def deferred():\n'
+                    '            self._each_provider("initialize failed",\n'
+                    '                lambda p: p.initialize(\n'
+                    '                    session_id=session_id, **kwargs))\n') + helper
+        elif mm_mode == "helperiffalse":
+            # negative (defect 2): helper call under `if False`
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        if False:\n'
+                    '            self._each_provider("initialize failed",\n'
+                    '                lambda p: p.initialize(\n'
+                    '                    session_id=session_id, **kwargs))\n') + helper
+        elif mm_mode == "otherrecv":
+            # negative (defect 3): initialize() received by something
+            # that is not the lambda parameter
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        self._each_provider("initialize failed",\n'
+                    '            lambda p: other.initialize(\n'
+                    '                session_id=session_id, **kwargs))\n') + helper
+        elif mm_mode == "twocalls":
+            # negative (defect 3): two initialize() calls in the
+            # callback; only one unpacks kwargs
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        self._each_provider("initialize failed",\n'
+                    '            lambda p: (p.initialize(session_id=session_id,\n'
+                    '                                   **kwargs),\n'
+                    '                       p.initialize(session_id="second")))\n') + helper
+        elif mm_mode == "delitem":
+            # negative (defect 5): entry removed via __delitem__
+            # after the guard, before the call
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        kwargs.__delitem__("hermes_home")\n'
+                    + call_cb) + helper
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + '        self._ready = True\n') + helper
@@ -442,6 +487,25 @@ def g4_suite(tmp):
                                 "propagates"))
     yield ("G4n7 helper stores callback (not synchronous) -> abort",
            lambda: expect_abort(tmp, "g4n7", {"mm_mode": "badsync"},
+                                "propagates"))
+    # negative table from the fourth review (recognizer defects):
+    yield ("G4n8 guard AFTER the helper call -> abort (ordering)",
+           lambda: expect_abort(tmp, "g4n8", {"mm_mode": "guardlate"},
+                                "propagates"))
+    yield ("G4n9 helper call inside never-run nested def -> abort",
+           lambda: expect_abort(tmp, "g4n9", {"mm_mode": "helperdef"},
+                                "propagates"))
+    yield ("G4n10 helper call under if False -> abort",
+           lambda: expect_abort(tmp, "g4n10", {"mm_mode": "helperiffalse"},
+                                "propagates"))
+    yield ("G4n11 initialize() on foreign receiver -> abort",
+           lambda: expect_abort(tmp, "g4n11", {"mm_mode": "otherrecv"},
+                                "propagates"))
+    yield ("G4n12 two initialize() calls in callback -> abort",
+           lambda: expect_abort(tmp, "g4n12", {"mm_mode": "twocalls"},
+                                "propagates"))
+    yield ("G4n13 kwargs.__delitem__ after guard -> abort",
+           lambda: expect_abort(tmp, "g4n13", {"mm_mode": "delitem"},
                                 "propagates"))
 
 

@@ -212,27 +212,27 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
             if isinstance(n, ast_mod.Name) and n.id == pk:
                 return False
 
-    compound = tuple(
-        x for x in (getattr(ast_mod, name, None) for name in
-                    ("If", "For", "AsyncFor", "While", "Try", "TryStar",
-                     "With", "AsyncWith", "Match", "FunctionDef",
-                     "AsyncFunctionDef", "ClassDef")) if x is not None)
+# (review 6) the former 'compound' tuple is gone: helper-call
+    # detection no longer walks statement sub-trees at all.
 
     # 3. helper call only from top-level statement flow (never
     #    inside compound statements or nested scopes), ordered
     #    after the guard.
     helper_attr = "_each_provider"
+    # review 6: the Call must BE the expression executed by the
+    # statement (the installed shape: a bare self._each_provider(...)
+    # expression statement). Not merely present in the statement's
+    # sub-tree: a lambda/IfExp/comprehension containing it never
+    # guarantees execution.
     hcs = []
     for i, stmt in enumerate(fn_node.body):
-        if isinstance(stmt, compound):
-            continue
-        for n in ast_mod.walk(stmt):
-            if (isinstance(n, ast_mod.Call)
-                    and isinstance(n.func, ast_mod.Attribute)
-                    and n.func.attr == helper_attr
-                    and isinstance(n.func.value, ast_mod.Name)
-                    and n.func.value.id == "self"):
-                hcs.append((i, n))
+        if (isinstance(stmt, ast_mod.Expr)
+                and isinstance(stmt.value, ast_mod.Call)
+                and isinstance(stmt.value.func, ast_mod.Attribute)
+                and stmt.value.func.attr == helper_attr
+                and isinstance(stmt.value.func.value, ast_mod.Name)
+                and stmt.value.func.value.id == "self"):
+            hcs.append((i, stmt.value))
     if len(hcs) != 1:
         return False
     helper_idx, hc = hcs[0]
@@ -271,7 +271,7 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
     kw_unpack = [kw for kw in m0.keywords
                  if kw.arg is None and isinstance(kw.value, ast_mod.Name)
                  and kw.value.id == pk]
-    if not kw_unpack:
+    if len(kw_unpack) != 1:
         return False
 
     # 2. strict occurrence allow-list for the name kwargs.
@@ -336,28 +336,45 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
             return False
     invoked = [False]
 
-    def find_call(node, loopvar):
-        if (isinstance(node, ast_mod.Call)
-                and isinstance(node.func, ast_mod.Name)
-                and node.func.id == cb_param
-                and any(isinstance(a, ast_mod.Name)
-                        and a.id == loopvar for a in node.args)):
-            invoked[0] = True
-        for c in ast_mod.iter_child_nodes(node):
-            find_call(c, loopvar)
+    def direct_call_in(stmt, loopvar):
+        # review 6: accepted ONLY as the executed expression of a
+        # statement, in the two positions justified by the host:
+        # (a) the call IS the expression statement; (b) the observed
+        # installed line: results.append(call(provider)) - the call
+        # is exactly one direct positional argument of <name>.append.
+        # Deferred forms (lambda, IfExp, comprehensions) are NOT
+        # descended into: presence in a sub-tree proves nothing.
+        def is_cb_call(node):
+            return (isinstance(node, ast_mod.Call)
+                    and isinstance(node.func, ast_mod.Name)
+                    and node.func.id == cb_param
+                    and len(node.args) == 1
+                    and isinstance(node.args[0], ast_mod.Name)
+                    and node.args[0].id == loopvar
+                    and not node.keywords)
+        if not isinstance(stmt, ast_mod.Expr):
+            return False
+        v = stmt.value
+        if is_cb_call(v):
+            return True
+        return (isinstance(v, ast_mod.Call)
+                and isinstance(v.func, ast_mod.Attribute)
+                and v.func.attr == "append"
+                and isinstance(v.func.value, ast_mod.Name)
+                and len(v.args) == 1
+                and is_cb_call(v.args[0]))
 
     def scan_direct(stmt, loopvar):
-        # direct flow inside the loop: statement-level expressions,
-        # descending ONLY through try/finally (the observed shape).
+        # direct flow inside the loop: descending ONLY through
+        # try/finally (the observed wrapper). Not through any other
+        # compound statement.
         if isinstance(stmt, ast_mod.Try):
-            for s in stmt.body:
-                scan_direct(s, loopvar)
-            for s in getattr(stmt, "finalbody", []):
-                scan_direct(s, loopvar)
+            for s in stmt.body + getattr(stmt, "finalbody", []):
+                if direct_call_in(s, loopvar):
+                    invoked[0] = True
             return
-        if isinstance(stmt, compound):
-            return
-        find_call(stmt, loopvar)
+        if direct_call_in(stmt, loopvar):
+            invoked[0] = True
 
     for s in helper.body:
         if isinstance(s, (ast_mod.For, ast_mod.AsyncFor)):
@@ -508,10 +525,20 @@ def check_host_contract(host_root=None) -> str:
                 "installed host; the initialization contract cannot "
                 "be bound to a single definition")
         cls = clss[0]
-        init_fn = next(
-            fn for fn in cls.body
-            if isinstance(fn, _ast.FunctionDef)
-            and fn.name == "initialize_all")
+        # review 6: same uniqueness rule as the class and the helper:
+        # exactly one initialize_all definition, and it must be the
+        # synchronous FunctionDef form. A second definition would win
+        # in the class namespace and be the method actually executed.
+        inits = [fn for fn in cls.body
+                 if isinstance(fn, (_ast.FunctionDef,
+                                    _ast.AsyncFunctionDef))
+                 and fn.name == "initialize_all"]
+        if len(inits) != 1 or not isinstance(inits[0], _ast.FunctionDef):
+            raise HostContractError(
+                "initialize_all definition is not unique (or is not a "
+                "synchronous def) in the installed host; the executed "
+                "method cannot be bound to a single definition")
+        init_fn = inits[0]
     except Exception as e:
         raise HostContractError(
             f"initialization contract not verifiable "

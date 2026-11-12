@@ -316,6 +316,44 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
             # namespace
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + call_cb) + helper + helper_store
+        elif mm_mode == "deferred_helper":
+            # negative (review 6, point 2): the helper call lives
+            # inside a lambda assigned to a name; it is never invoked.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        deferred = lambda: self._each_provider(\n'
+                      '            "initialize failed",\n'
+                      '            lambda p: p.initialize(\n'
+                      '                session_id=session_id, **kwargs))\n'
+                    ) + helper
+        elif mm_mode == "deferred_cb":
+            # negative (review 6, point 1): the callback call lives
+            # inside a lambda assigned inside the loop; never invoked.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in self._providers:\n'
+                      '            deferred = lambda: call(provider)\n')
+        elif mm_mode == "ifexp_cb":
+            # negative (review 6, point 1): callback call under a
+            # conditional expression; the branch is not executed.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in self._providers:\n'
+                      '            result = call(provider) if False else None\n')
+        elif mm_mode == "dualinit":
+            # negative (review 6, point 3): two initialize_all
+            # definitions; the second would win in the class namespace
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def initialize_all(self, **kwargs):\n'
+                      '        pass\n') + helper
+        elif mm_mode == "asyncinit":
+            # negative (review 6, point 3): async initialize_all is
+            # not the executed synchronous shape
+            body = ('    async def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb) + helper
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + '        self._ready = True\n') + helper
@@ -561,6 +599,23 @@ def g4_suite(tmp):
     yield ("G4n18 two _each_provider definitions -> abort",
            lambda: expect_abort(tmp, "g4n18", {"mm_mode": "dualhelper"},
                                 "propagates"))
+    # negative table from the sixth review:
+    yield ("G4n19 helper call deferred inside an assigned lambda -> abort",
+           lambda: expect_abort(tmp, "g4n19",
+                                {"mm_mode": "deferred_helper"},
+                                "propagates"))
+    yield ("G4n20 callback call deferred in lambda inside loop -> abort",
+           lambda: expect_abort(tmp, "g4n20", {"mm_mode": "deferred_cb"},
+                                "propagates"))
+    yield ("G4n21 callback call under conditional expression -> abort",
+           lambda: expect_abort(tmp, "g4n21", {"mm_mode": "ifexp_cb"},
+                                "propagates"))
+    yield ("G4n22 two initialize_all definitions -> abort",
+           lambda: expect_abort(tmp, "g4n22", {"mm_mode": "dualinit"},
+                                "not unique"))
+    yield ("G4n23 async initialize_all -> abort",
+           lambda: expect_abort(tmp, "g4n23", {"mm_mode": "asyncinit"},
+                                "not unique"))
 
 
 def g4_positive(tmp, mode, label_home):

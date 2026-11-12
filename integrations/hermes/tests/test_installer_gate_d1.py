@@ -373,6 +373,42 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
                       '                session_id=session_id, **kwargs)\n'
                       '                if False else None))\n'
                     ) + helper
+        elif mm_mode == "loop_empty":
+            # negative (review 8, point 1): loop over an empty tuple;
+            # the direct call position is real but never iterates.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in ():\n'
+                      '            call(provider)\n')
+        elif mm_mode == "loop_after_return":
+            # negative (review 8, point 1): loop after an
+            # unconditional return; unreachable.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        return []\n'
+                      '        for provider in self._providers:\n'
+                      '            call(provider)\n')
+        elif mm_mode == "loop_foreign":
+            # negative (review 8, point 1): loop over an iterable
+            # that is not the providers list.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in self._others:\n'
+                      '            call(provider)\n')
+        elif mm_mode == "return_before_guard":
+            # negative (review 8, point 2): unconditional return
+            # before the guard; neither guard nor call executes.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        return\n'
+                    + guard + call_cb) + helper
+        elif mm_mode == "return_between":
+            # negative (review 8, point 2): return between the guard
+            # and the helper call.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + '        return\n' + call_cb) + helper
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + '        self._ready = True\n') + helper
@@ -641,6 +677,24 @@ def g4_suite(tmp):
                                 "propagates"))
     yield ("G4n25 initialize() under IfExp inside the callback -> abort",
            lambda: expect_abort(tmp, "g4n25", {"mm_mode": "init_ifexp"},
+                                "propagates"))
+    # negative table from the eighth review:
+    yield ("G4n26 helper loop over empty tuple -> abort",
+           lambda: expect_abort(tmp, "g4n26", {"mm_mode": "loop_empty"},
+                                "propagates"))
+    yield ("G4n27 helper loop after return (unreachable) -> abort",
+           lambda: expect_abort(tmp, "g4n27",
+                                {"mm_mode": "loop_after_return"},
+                                "propagates"))
+    yield ("G4n28 helper loop over foreign iterable -> abort",
+           lambda: expect_abort(tmp, "g4n28", {"mm_mode": "loop_foreign"},
+                                "propagates"))
+    yield ("G4n29 return before guard in initialize_all -> abort",
+           lambda: expect_abort(tmp, "g4n29",
+                                {"mm_mode": "return_before_guard"},
+                                "propagates"))
+    yield ("G4n30 return between guard and helper call -> abort",
+           lambda: expect_abort(tmp, "g4n30", {"mm_mode": "return_between"},
                                 "propagates"))
 
 

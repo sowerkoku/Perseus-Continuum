@@ -208,6 +208,17 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
     g_store = stores[0]
     guard_idx = fn_node.body.index(g)
 
+    # review 8: unconditional terminators (return/raise) at THIS level
+    # make everything after them unreachable. The guard and the helper
+    # call must both precede any of them.
+    term_idx = None
+    for i, stmt in enumerate(fn_node.body):
+        if isinstance(stmt, (ast_mod.Return, ast_mod.Raise)):
+            term_idx = i
+            break
+    if term_idx is not None and term_idx < guard_idx:
+        return False
+
     # 1b. no use of kwargs before the guard (key not yet guaranteed)
     for stmt in fn_node.body[:guard_idx]:
         for n in ast_mod.walk(stmt):
@@ -239,6 +250,9 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
         return False
     helper_idx, hc = hcs[0]
     if guard_idx >= helper_idx:
+        return False
+    if term_idx is not None and term_idx < helper_idx:
+        # return/raise between guard and call: the call is unreachable
         return False
     lambdas = [a for a in hc.args if isinstance(a, ast_mod.Lambda)]
     if len(lambdas) != 1:
@@ -378,9 +392,30 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
         if direct_call_in(stmt, loopvar):
             invoked[0] = True
 
+    def host_iter(node):
+        # review 8: the loop must iterate the providers list, in one
+        # of the two observed forms: the plain attribute, or the
+        # installed host's selection expression
+        # `self._providers if providers is None else providers`.
+        # Empty tuples and foreign iterables prove no real iteration.
+        if (isinstance(node, ast_mod.Attribute)
+                and isinstance(node.value, ast_mod.Name)
+                and node.value.id == "self"
+                and node.attr == "_providers"):
+            return True
+        return (isinstance(node, ast_mod.IfExp)
+                and host_iter(node.body)
+                and isinstance(node.orelse, ast_mod.Name))
+
     for s in helper.body:
+        # reachable statements only: stop at the first unconditional
+        # terminator at this level
+        if isinstance(s, (ast_mod.Return, ast_mod.Raise)):
+            break
         if isinstance(s, (ast_mod.For, ast_mod.AsyncFor)):
             if not isinstance(s.target, ast_mod.Name):
+                continue
+            if not host_iter(s.iter):
                 continue
             for stmt in s.body:
                 scan_direct(stmt, s.target.id)

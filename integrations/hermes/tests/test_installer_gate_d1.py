@@ -27,6 +27,7 @@ turn green with the gate.
 Standalone: python3 integrations/hermes/tests/test_installer_gate_d1.py
 """
 import hashlib
+import stat
 import os
 import subprocess
 import sys
@@ -58,11 +59,15 @@ def snapshot(root: Path) -> dict:
     out = {}
     if not root.exists():
         return out
+    # review 9: the root itself is part of what must not change, and
+    # full permission bits (incl. setuid/setgid/sticky) are kept:
+    # S_IMODE, not oct(...)[-3:].
+    out[""] = ("ROOT", stat.S_IMODE(root.stat().st_mode))
 
     def walk(d: Path):
         for e in os.scandir(d):
             rel = str(Path(e.path).relative_to(root))
-            mode = oct(e.stat(follow_symlinks=False).st_mode)[-3:]
+            mode = stat.S_IMODE(e.stat(follow_symlinks=False).st_mode)
             if e.is_symlink():
                 out[rel] = ("LINK", os.readlink(e.path), mode)
             elif e.is_dir(follow_symlinks=False):
@@ -104,10 +109,15 @@ def run_installer(home: Path, *, token="gate-test-token",
         return r
     except subprocess.TimeoutExpired as t:
         class R:
+            # review 9: a timeout is NOT evidence about the gate: it
+            # is flagged explicitly so every rejection test fails on
+            # it. Whether it passed the write point is unknown here;
+            # only the filesystem snapshot can show actual writes.
             returncode = 99
+            timed_out = True
             stdout = (t.stdout or b"").decode() if isinstance(t.stdout, bytes) else (t.stdout or "")
             stderr = (t.stderr or b"").decode() if isinstance(t.stderr, bytes) else (t.stderr or "")
-            proceeded_past_write = True
+            proceeded_past_write = None
         return R()
 
 
@@ -409,6 +419,25 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
             # and the helper call.
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + '        return\n' + call_cb) + helper
+        elif mm_mode == "raise_before_guard":
+            # negative (review 9, point 3): raise before the guard:
+            # equivalent unreachability to return_before_guard
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        raise RuntimeError("no")\n'
+                    + guard + call_cb) + helper
+        elif mm_mode == "raise_between":
+            # negative: raise between guard and helper call
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + '        raise RuntimeError("stop")\n'
+                    + call_cb) + helper
+        elif mm_mode == "raise_before_loop":
+            # negative: raise before the loop in the helper body
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        raise RuntimeError("stop")\n'
+                      '        for provider in self._providers:\n'
+                      '            call(provider)\n')
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + '        self._ready = True\n') + helper
@@ -446,6 +475,8 @@ def expect_abort(tmp, label, stub_kwargs, want_in_msg):
     r = run_installer(home, gate_root=stub)
     after = snapshot(home)
     problems = []
+    if getattr(r, "timed_out", False):
+        problems.append("TIMEOUT: not evidence that the gate aborted")
     if r.returncode == 0:
         problems.append("installer completed despite broken host")
     if after != before:
@@ -563,14 +594,20 @@ def f7(tmp):
     home = tmp / "f7-home"
     home.mkdir()
     stub = make_stub(tmp / "f7-host", sct=False)
+    # review 9: snapshot() now always carries the ROOT entry, so
+    # emptiness is not the right assertion: compare against the
+    # actual pre-run baseline of this same (empty) home.
+    before = snapshot(home)
     r = run_installer(home, token="valid-looking-token", gate_root=stub)
     out = (r.stdout + r.stderr).lower()
     problems = []
+    if getattr(r, "timed_out", False):
+        problems.append("TIMEOUT: not evidence that the gate aborted")
     if r.returncode == 0:
         problems.append("no abort despite broken host")
     if "contract" not in out and "gate" not in out:
         problems.append("gate failure not reported first")
-    if snapshot(home):
+    if snapshot(home) != before:
         problems.append("files written despite gate failure")
     return (not problems), "; ".join(problems)
 
@@ -696,6 +733,20 @@ def g4_suite(tmp):
     yield ("G4n30 return between guard and helper call -> abort",
            lambda: expect_abort(tmp, "g4n30", {"mm_mode": "return_between"},
                                 "propagates"))
+    # raise equivalents (review 9, point 3): same unreachability,
+    # different terminator
+    yield ("G4n31 raise before guard in initialize_all -> abort",
+           lambda: expect_abort(tmp, "g4n31",
+                                {"mm_mode": "raise_before_guard"},
+                                "propagates"))
+    yield ("G4n32 raise between guard and helper call -> abort",
+           lambda: expect_abort(tmp, "g4n32",
+                                {"mm_mode": "raise_between"},
+                                "propagates"))
+    yield ("G4n33 raise before loop in helper -> abort",
+           lambda: expect_abort(tmp, "g4n33",
+                                {"mm_mode": "raise_before_loop"},
+                                "propagates"))
 
 
 def g4_positive(tmp, mode, label_home):
@@ -753,7 +804,7 @@ def l1(tmp):
     l3f = chain / "bin" / "sub" / "deeper" / "l3"
     l3f.write_text(
         "#!/usr/bin/env python3\nimport sys\n"
-        f"sys.path.insert(0, '\"'\"'{host}'\"'\"')\nprint('stub')\n")
+        f"sys.path.insert(0, {str(host)!r})\nprint('stub')\n")
     l3f.chmod(0o755)
     r = gate_probe(path_prepend=chain / "bin")
     out = r.stdout + r.stderr
@@ -763,7 +814,9 @@ def l1(tmp):
 
 
 def l2(tmp):
-    # quoted exec target + shell quote-joined sys.path literal
+    # quoted exec target (shell layer only; the Python path literal
+    # is clean here, and the quote-joined literal gets its own case
+    # in L4, per review 9: one property per test)
     host = make_stub(tmp / "l2-host")
     chain = tmp / "l2-chain"
     (chain / "bin" / "inner").mkdir(parents=True)
@@ -773,11 +826,32 @@ def l2(tmp):
     inner = chain / "bin" / "inner" / "l2"
     inner.write_text(
         "#!/usr/bin/env python3\nimport sys\n"
-        f"sys.path.insert(0, '\"'\"'{host}'\"'\"')\nprint('stub')\n")
+        f"sys.path.insert(0, {str(host)!r})\nprint('stub')\n")
     inner.chmod(0o755)
     r = gate_probe(path_prepend=chain / "bin")
     if f"GATE_OK 0.23.1 {host}" not in r.stdout:
         return False, f"quoted exec/quote-join not resolved to the stub: {(r.stdout + r.stderr)[-250:]}"
+    return True, ""
+
+
+def l4(tmp):
+    # review 9: separate case for the SHELL quote-joined sys.path
+    # literal, exactly as the installed Hermes launcher writes it:
+    # exec python3 -I -c '... sys.path.insert(0, '"'"'PATH'"'"') ...'
+    # The discoverer must extract the bare path from that form.
+    host = make_stub(tmp / "l4-host")
+    chain = tmp / "l4-chain"
+    (chain / "bin").mkdir(parents=True)
+    w = chain / "bin" / "hermes"
+    joined = "'\"'\"'" + str(host) + "'\"'\"'"
+    body = ("import sys\nsys.path.insert(0, " + joined
+            + ")\nprint('stub')")
+    w.write_text("#!/bin/sh\nexec /usr/bin/python3 -I -c "
+                 + body + ' "$@"\n')
+    w.chmod(0o755)
+    r = gate_probe(path_prepend=chain / "bin")
+    if f"GATE_OK 0.23.1 {host}" not in r.stdout:
+        return False, f"quote-joined sys.path literal not resolved: {(r.stdout + r.stderr)[-250:]}"
     return True, ""
 
 
@@ -896,6 +970,7 @@ def main():
         for name, fn in (("L1 relative exec chain resolves via p.parent", l1),
                          ("L2 quoted exec + quote-joined path literal", l2),
                          ("L3 chain deeper than cap -> explicit abort", l3),
+                         ("L4 quote-joined sys.path literal (host form)", l4),
                          ("SN1 snapshot sensitivity (dir/link/chmod)", sn1)):
             try:
                 ok, det = fn(tmp)

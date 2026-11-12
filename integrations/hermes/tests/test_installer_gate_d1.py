@@ -278,6 +278,44 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
                     + guard
                     + '        kwargs.__delitem__("hermes_home")\n'
                     + call_cb) + helper
+        elif mm_mode == "setdefault":
+            # negative (review 5, point 1): mutating call disguised
+            # as a read
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        kwargs.setdefault("hermes_home", "/otro")\n'
+                    + call_cb) + helper
+        elif mm_mode == "alias":
+            # negative (point 1): mutation through an alias of kwargs
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        cfg = kwargs\n'
+                    '        cfg.clear()\n'
+                    + call_cb) + helper
+        elif mm_mode == "helpercond":
+            # negative (point 2): callback under `if False` inside
+            # the helper loop
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in self._providers:\n'
+                      '            if False:\n'
+                      '                call(provider)\n')
+        elif mm_mode == "helpercondvar":
+            # negative (point 2): callback under a variable condition
+            # inside the helper loop
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in self._providers:\n'
+                      '            if self.enabled:\n'
+                      '                call(provider)\n')
+        elif mm_mode == "dualhelper":
+            # negative (point 3): two definitions of _each_provider;
+            # the second (non-synchronous) would win in the class
+            # namespace
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb) + helper + helper_store
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + '        self._ready = True\n') + helper
@@ -506,6 +544,22 @@ def g4_suite(tmp):
                                 "propagates"))
     yield ("G4n13 kwargs.__delitem__ after guard -> abort",
            lambda: expect_abort(tmp, "g4n13", {"mm_mode": "delitem"},
+                                "propagates"))
+    # negative table from the fifth review:
+    yield ("G4n14 kwargs.setdefault -> abort (mutation, not read)",
+           lambda: expect_abort(tmp, "g4n14", {"mm_mode": "setdefault"},
+                                "propagates"))
+    yield ("G4n15 alias of kwargs then clear() -> abort",
+           lambda: expect_abort(tmp, "g4n15", {"mm_mode": "alias"},
+                                "propagates"))
+    yield ("G4n16 callback under if False inside helper loop -> abort",
+           lambda: expect_abort(tmp, "g4n16", {"mm_mode": "helpercond"},
+                                "propagates"))
+    yield ("G4n17 callback under variable condition -> abort",
+           lambda: expect_abort(tmp, "g4n17", {"mm_mode": "helpercondvar"},
+                                "propagates"))
+    yield ("G4n18 two _each_provider definitions -> abort",
+           lambda: expect_abort(tmp, "g4n18", {"mm_mode": "dualhelper"},
                                 "propagates"))
 
 

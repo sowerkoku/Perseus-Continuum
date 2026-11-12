@@ -138,33 +138,38 @@ class HostContractError(RuntimeError):
 
 def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
     """Bounded RECOGNIZER of the Hermes 0.23.1 initialization shape.
-    Every property below maps to an observed fact of the installed
-    host; anything not matching fails closed. This is not a general
-    analyzer.
+    Every property maps to an observed fact of the installed host;
+    anything else fails closed. Not a general analyzer - no alias
+    analysis, no flow inference.
 
     1. Exactly one membership guard 'if key not in kwargs:' as a
        TOP-LEVEL statement; body = inert imports plus exactly one
-       store kwargs[key]; no else. The guard PRECEDES any use of
-       kwargs and PRECEDES the helper call (statement order).
-    2. Nothing may mutate kwargs: any Store/Del of the name, any
-       Subscript store, any entry deletion, and any attribute call
-       on it other than the observed read '.get' - including
-       __setitem__/__delitem__ - is rejected.
+       store kwargs[key]; no else. The guard precedes every use of
+       kwargs and precedes the helper call (statement order).
+    2. STRICT OCCURRENCE ALLOW-LIST for the name kwargs: it may
+       appear ONLY in (a) the guard membership test, (b) Subscript
+       reads (Load), (c) the receiver of '.get', (d) the '**kwargs'
+       of the single recognized initialize() call. Any other
+       occurrence - store, rebinding, deletion, alias creation
+       (cfg = kwargs), argument to any other call, setdefault or
+       any other attribute call - is rejected. Additionally, no
+       Subscript store into kwargs other than the guard's own.
     3. Exactly one self._each_provider(...) call, located directly
-       in the top-level statement flow of initialize_all - not
-       inside nested defs, lambdas, conditionals, loops or
-       try/with bodies. It carries exactly one positional lambda,
-       at the helper's callback-parameter position.
-    4. That lambda contains EXACTLY ONE initialize() call, whose
-       receiver is the lambda's own first parameter, unpacking
-       **kwargs. No initialize() exists anywhere else in the
-       function.
-    5. MemoryManager._each_provider matches the installed
-       synchronous shape: a top-level for-loop in the helper body
-       whose executable flow calls call(<loop variable>) directly;
-       the callback parameter is never stored or rebound. A call
-       found only under an unprovable branch or outside the loop
-       is not evidence.
+       in the top-level statement flow of initialize_all - never
+       inside nested defs/lambdas or compound statements. It
+       carries exactly one positional lambda, at the helper's
+       callback-parameter position.
+    4. The lambda contains EXACTLY ONE initialize() call, received
+       by the lambda's own first parameter, unpacking **kwargs; no
+       initialize() exists anywhere else in the function.
+    5. MemoryManager contains EXACTLY ONE definition of
+       _each_provider (an async or duplicated definition fails
+       closed), matching the installed synchronous shape: a
+       top-level for-loop in the helper body whose DIRECT flow
+       (statement level, descending only through try/finally, the
+       observed wrapper) calls call(<loop variable>) directly. A
+       call under an if/match/inner loop is not evidence. The
+       callback parameter is never stored or rebound.
     """
     pk = fn_node.args.kwarg.arg if fn_node.args.kwarg else None
     if not pk:
@@ -180,18 +185,12 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
                 and node.targets[0].slice.value == key)
 
     def guard_test(t):
-        comp = (isinstance(t, ast_mod.Compare) and len(t.ops) == 1
+        return (isinstance(t, ast_mod.Compare) and len(t.ops) == 1
+                and isinstance(t.ops[0], ast_mod.NotIn)
                 and isinstance(t.left, ast_mod.Constant)
                 and t.left.value == key
                 and isinstance(t.comparators[0], ast_mod.Name)
                 and t.comparators[0].id == pk)
-        if comp and isinstance(t.ops[0], ast_mod.NotIn):
-            return True
-        if (isinstance(t, ast_mod.UnaryOp)
-                and isinstance(t.op, ast_mod.Not)
-                and comp and isinstance(t.operand.ops[0], ast_mod.In)):
-            return True
-        return False
 
     # 1. unique top-level guard, inert imports + one store, no else
     guards = [s for s in fn_node.body
@@ -213,43 +212,15 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
             if isinstance(n, ast_mod.Name) and n.id == pk:
                 return False
 
-    # 2. whitelist of kwargs operations: reads (Subscript Load and
-    #    .get) only; every other write/mutation fails closed.
-    for n in ast_mod.walk(fn_node):
-        if isinstance(n, ast_mod.Name) and n.id == pk:
-            if isinstance(n.ctx, (ast_mod.Store, ast_mod.Del)):
-                return False
-        elif isinstance(n, ast_mod.Delete):
-            for t in n.targets:
-                if (isinstance(t, ast_mod.Subscript)
-                        and isinstance(t.value, ast_mod.Name)
-                        and t.value.id == pk):
-                    return False
-        elif isinstance(n, (ast_mod.Assign, ast_mod.AugAssign,
-                            ast_mod.AnnAssign)):
-            targets = (n.targets if isinstance(n, ast_mod.Assign)
-                       else [n.target])
-            for t in targets:
-                if (n is not g_store
-                        and isinstance(t, ast_mod.Subscript)
-                        and isinstance(t.value, ast_mod.Name)
-                        and t.value.id == pk):
-                    return False
-        elif (isinstance(n, ast_mod.Call)
-                and isinstance(n.func, ast_mod.Attribute)
-                and isinstance(n.func.value, ast_mod.Name)
-                and n.func.value.id == pk
-                and n.func.attr != "get"):
-            return False
-
-    # 3. helper call only from top-level statement flow (never
-    #    inside compound statements or nested scopes), ordered
-    #    after the guard.
     compound = tuple(
         x for x in (getattr(ast_mod, name, None) for name in
                     ("If", "For", "AsyncFor", "While", "Try", "TryStar",
                      "With", "AsyncWith", "Match", "FunctionDef",
                      "AsyncFunctionDef", "ClassDef")) if x is not None)
+
+    # 3. helper call only from top-level statement flow (never
+    #    inside compound statements or nested scopes), ordered
+    #    after the guard.
     helper_attr = "_each_provider"
     hcs = []
     for i, stmt in enumerate(fn_node.body):
@@ -297,18 +268,63 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
     if not (isinstance(m0.func.value, ast_mod.Name)
             and m0.func.value.id == lp):
         return False
-    if not any(kw.arg is None and isinstance(kw.value, ast_mod.Name)
-               and kw.value.id == pk for kw in m0.keywords):
+    kw_unpack = [kw for kw in m0.keywords
+                 if kw.arg is None and isinstance(kw.value, ast_mod.Name)
+                 and kw.value.id == pk]
+    if not kw_unpack:
         return False
 
-    # 5. the helper must be the installed synchronous shape:
-    #    top-level for-loop calling cb_param(<loop var>) directly;
-    #    the callback parameter never stored or rebound.
-    helper = next((f for f in cls_node.body
-                   if isinstance(f, ast_mod.FunctionDef)
-                   and f.name == helper_attr), None)
-    if helper is None:
+    # 2. strict occurrence allow-list for the name kwargs.
+    allowed_ids = set()
+    for n in ast_mod.walk(g.test):
+        if isinstance(n, ast_mod.Name) and n.id == pk:
+            allowed_ids.add(id(n))
+    for kw in kw_unpack:
+        allowed_ids.add(id(kw.value))
+    for n in ast_mod.walk(g_store):
+        if isinstance(n, ast_mod.Name) and n.id == pk:
+            # the guard's own store is the single permitted write
+            allowed_ids.add(id(n))
+    for n in ast_mod.walk(fn_node):
+        if (isinstance(n, ast_mod.Subscript)
+                and isinstance(n.value, ast_mod.Name)
+                and n.value.id == pk
+                and isinstance(n.ctx, ast_mod.Load)
+                and isinstance(n.value.ctx, ast_mod.Load)):
+            # reads only: `del kwargs[k]` IS a Subscript with ctx=Del
+            # and its base Name is ctx=Load, so the Subscript's own
+            # context must be checked as well.
+            allowed_ids.add(id(n.value))
+        elif (isinstance(n, ast_mod.Call)
+                and isinstance(n.func, ast_mod.Attribute)
+                and n.func.attr == "get"
+                and isinstance(n.func.value, ast_mod.Name)
+                and n.func.value.id == pk):
+            allowed_ids.add(id(n.func.value))
+    for n in ast_mod.walk(fn_node):
+        if isinstance(n, ast_mod.Name) and n.id == pk:
+            if id(n) not in allowed_ids:
+                return False
+    for n in ast_mod.walk(fn_node):
+        if isinstance(n, (ast_mod.Assign, ast_mod.AugAssign,
+                          ast_mod.AnnAssign)):
+            targets = (n.targets if isinstance(n, ast_mod.Assign)
+                       else [n.target])
+            for t in targets:
+                if (n is not g_store
+                        and isinstance(t, ast_mod.Subscript)
+                        and isinstance(t.value, ast_mod.Name)
+                        and t.value.id == pk):
+                    return False
+
+    # 5. unique, structurally-matched synchronous helper.
+    defs = [f for f in cls_node.body
+            if isinstance(f, (ast_mod.FunctionDef,
+                              ast_mod.AsyncFunctionDef))
+            and f.name == helper_attr]
+    if len(defs) != 1 or not isinstance(defs[0], ast_mod.FunctionDef):
         return False
+    helper = defs[0]
     pos = helper.args.args
     idx = hc.args.index(cb)
     if idx + 1 >= len(pos):
@@ -320,11 +336,7 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
             return False
     invoked = [False]
 
-    def scan_flow(node, loopvar):
-        if isinstance(node, (ast_mod.FunctionDef,
-                             ast_mod.AsyncFunctionDef,
-                             ast_mod.Lambda, ast_mod.ClassDef)):
-            return
+    def find_call(node, loopvar):
         if (isinstance(node, ast_mod.Call)
                 and isinstance(node.func, ast_mod.Name)
                 and node.func.id == cb_param
@@ -332,14 +344,27 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
                         and a.id == loopvar for a in node.args)):
             invoked[0] = True
         for c in ast_mod.iter_child_nodes(node):
-            scan_flow(c, loopvar)
+            find_call(c, loopvar)
+
+    def scan_direct(stmt, loopvar):
+        # direct flow inside the loop: statement-level expressions,
+        # descending ONLY through try/finally (the observed shape).
+        if isinstance(stmt, ast_mod.Try):
+            for s in stmt.body:
+                scan_direct(s, loopvar)
+            for s in getattr(stmt, "finalbody", []):
+                scan_direct(s, loopvar)
+            return
+        if isinstance(stmt, compound):
+            return
+        find_call(stmt, loopvar)
 
     for s in helper.body:
         if isinstance(s, (ast_mod.For, ast_mod.AsyncFor)):
             if not isinstance(s.target, ast_mod.Name):
                 continue
             for stmt in s.body:
-                scan_flow(stmt, s.target.id)
+                scan_direct(stmt, s.target.id)
     return invoked[0]
 
 
@@ -474,10 +499,15 @@ def check_host_contract(host_root=None) -> str:
         tree = _ast.parse(
             (root / "agent" / "memory_manager.py").read_text(
                 encoding="utf-8"))
-        cls = next(
-            c for c in tree.body
-            if isinstance(c, _ast.ClassDef)
-            and c.name == "MemoryManager")
+        clss = [c for c in tree.body
+                if isinstance(c, _ast.ClassDef)
+                and c.name == "MemoryManager"]
+        if len(clss) != 1:
+            raise HostContractError(
+                "MemoryManager definition is not unique in the "
+                "installed host; the initialization contract cannot "
+                "be bound to a single definition")
+        cls = clss[0]
         init_fn = next(
             fn for fn in cls.body
             if isinstance(fn, _ast.FunctionDef)

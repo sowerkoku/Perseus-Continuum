@@ -354,6 +354,25 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
             # not the executed synchronous shape
             body = ('    async def initialize_all(self, session_id, **kwargs):\n'
                     + guard + call_cb) + helper
+        elif mm_mode == "init_lambda":
+            # negative (review 7): the only initialize() lives inside
+            # a nested lambda returned by the callback; never invoked.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        self._each_provider("initialize failed",\n'
+                      '            lambda p: (lambda: p.initialize(\n'
+                      '                session_id=session_id, **kwargs)))\n'
+                    ) + helper
+        elif mm_mode == "init_ifexp":
+            # negative (review 7): initialize() under a conditional
+            # expression inside the callback; the branch never runs.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        self._each_provider("initialize failed",\n'
+                      '            lambda p: (p.initialize(\n'
+                      '                session_id=session_id, **kwargs)\n'
+                      '                if False else None))\n'
+                    ) + helper
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + '        self._ready = True\n') + helper
@@ -616,6 +635,13 @@ def g4_suite(tmp):
     yield ("G4n23 async initialize_all -> abort",
            lambda: expect_abort(tmp, "g4n23", {"mm_mode": "asyncinit"},
                                 "not unique"))
+    # negative table from the seventh review:
+    yield ("G4n24 initialize() nested in a lambda returned by the callback -> abort",
+           lambda: expect_abort(tmp, "g4n24", {"mm_mode": "init_lambda"},
+                                "propagates"))
+    yield ("G4n25 initialize() under IfExp inside the callback -> abort",
+           lambda: expect_abort(tmp, "g4n25", {"mm_mode": "init_ifexp"},
+                                "propagates"))
 
 
 def g4_positive(tmp, mode, label_home):

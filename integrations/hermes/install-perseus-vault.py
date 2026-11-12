@@ -159,9 +159,11 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
        inside nested defs/lambdas or compound statements. It
        carries exactly one positional lambda, at the helper's
        callback-parameter position.
-    4. The lambda contains EXACTLY ONE initialize() call, received
-       by the lambda's own first parameter, unpacking **kwargs; no
-       initialize() exists anywhere else in the function.
+    4. The BODY of the lambda IS exactly one initialize() call
+       (direct position; no nested lambda/IfExp/comprehension),
+       received by the lambda's own first parameter, unpacking
+       **kwargs; no initialize() exists anywhere else in the
+       function.
     5. MemoryManager contains EXACTLY ONE definition of
        _each_provider (an async or duplicated definition fails
        closed), matching the installed synchronous shape: a
@@ -248,23 +250,23 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
         return False
     lp = cb.args.args[0].arg
 
-    # 4. exactly one initialize() inside the callback, received by
-    #    the lambda parameter, unpacking **kwargs; none elsewhere.
-    def find_inits(node):
-        return [m for m in ast_mod.walk(node)
-                if isinstance(m, ast_mod.Call)
-                and isinstance(m.func, ast_mod.Attribute)
-                and m.func.attr == "initialize"]
-
-    cb_inits = find_inits(cb)
-    if len(cb_inits) != 1:
+    # 4. exactly one initialize(), and it must BE the body of the
+    #    callback lambda (review 7): the installed Hermes 0.23.1 form
+    #    is lambda p: p.initialize(...). A call nested under another
+    #    lambda, an IfExp or a comprehension is not executed by the
+    #    callback and is not accepted. The receiver must be the lambda
+    #    parameter, and no other initialize() may exist anywhere.
+    m0 = cb.body
+    if not (isinstance(m0, ast_mod.Call)
+            and isinstance(m0.func, ast_mod.Attribute)
+            and m0.func.attr == "initialize"):
         return False
-    total = []
-    for stmt in fn_node.body:
-        total.extend(find_inits(stmt))
-    if len(total) != 1:
+    total_inits = [n for n in ast_mod.walk(fn_node)
+                   if isinstance(n, ast_mod.Call)
+                   and isinstance(n.func, ast_mod.Attribute)
+                   and n.func.attr == "initialize"]
+    if len(total_inits) != 1 or total_inits[0] is not m0:
         return False
-    m0 = cb_inits[0]
     if not (isinstance(m0.func.value, ast_mod.Name)
             and m0.func.value.id == lp):
         return False

@@ -29,6 +29,7 @@ Standalone: python3 integrations/hermes/tests/test_installer_gate_d1.py
 import hashlib
 import stat
 import os
+import pty
 import subprocess
 import sys
 import tempfile
@@ -83,7 +84,8 @@ def snapshot(root: Path) -> dict:
 
 
 def run_installer(home: Path, *, token="gate-test-token",
-                  gate_root=None, path_prepend=None, timeout=40):
+                  gate_root=None, path_prepend=None, timeout=40,
+                  tty_stdin=False):
     """Run the real installer against an isolated HERMES_HOME.
 
     Post-write verification steps are slow by design; the gate must
@@ -102,9 +104,18 @@ def run_installer(home: Path, *, token="gate-test-token",
         env["PERSEUS_VAULT_MCP_TOKEN"] = token
     if gate_root is not None:
         env["PERSEUS_GATE_HOST_ROOT"] = str(gate_root)
+    pty_pair = None
+    stdin = None
+    if tty_stdin:
+        # a real tty on stdin makes the installer's prompt layer
+        # reachable (sys.stdin.isatty()); the gate must still abort
+        # BEFORE that layer emits anything.
+        pty_pair = pty.openpty()
+        stdin = pty_pair[1]
     try:
         r = subprocess.run([sys.executable, str(INSTALLER)], env=env,
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout,
+                           stdin=stdin)
         r.proceeded_past_write = None
         return r
     except subprocess.TimeoutExpired as t:
@@ -119,6 +130,10 @@ def run_installer(home: Path, *, token="gate-test-token",
             stderr = (t.stderr or b"").decode() if isinstance(t.stderr, bytes) else (t.stderr or "")
             proceeded_past_write = None
         return R()
+    finally:
+        if pty_pair:
+            os.close(pty_pair[0])
+            os.close(pty_pair[1])
 
 
 # ---------------------------------------------------------------------
@@ -506,13 +521,25 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
 # and writes (it must before and after the gate exists).
 # ---------------------------------------------------------------------
 
+# full-install runs (gate PASS + real writes) take 33-40 s on this
+# ARM board at ~1.5 load, measured; negatives abort at the gate in
+# <1 s. The two full-install cases get a real margin so a timeout
+# means a genuine hang, not a tight harness constant.
+FULL_INSTALL_TIMEOUT = 180
+
+
 def f0(tmp):
     home = tmp / "f0-home"
     home.mkdir()
     stub = make_stub(tmp / "f0-host")
-    r = run_installer(home, gate_root=stub)
-    # review 10 (F-B1): snapshot() truthiness is not an assertion;
-    # verify the concrete artifacts the installer must write.
+    r = run_installer(home, gate_root=stub, timeout=FULL_INSTALL_TIMEOUT)
+    # review 11: success = exit 0 + no timeout + artifacts (same
+    # criterion as g4_positive; the pattern is shared with F0)
+    if getattr(r, "timed_out", False):
+        return False, "TIMEOUT with a full host"
+    if r.returncode != 0:
+        return False, (f"installer exited {r.returncode} with a full "
+                       f"host (tail: {r.stdout[-300:]})")
     expect = [home / "plugins" / "perseus-vault" / "plugin.yaml",
               home / "plugins" / "perseus-vault" / "provider.py"]
     missing = [str(p) for p in expect if not p.is_file()]
@@ -653,19 +680,27 @@ def f7(tmp):
     home = tmp / "f7-home"
     home.mkdir()
     stub = make_stub(tmp / "f7-host", sct=False)
-    # review 9: snapshot() now always carries the ROOT entry, so
-    # emptiness is not the right assertion: compare against the
-    # actual pre-run baseline of this same (empty) home.
     before = snapshot(home)
-    r = run_installer(home, token="valid-looking-token", gate_root=stub)
-    out = (r.stdout + r.stderr).lower()
+    # review 11: the ORDER claim is now demonstrated against the
+    # installer's real prompt marker, with stdin attached to an
+    # actual pty so the prompt layer IS reachable (isatty() true).
+    # If the gate works, the prompt banner never appears: the gate
+    # is provably the first failure reported, not merely "present".
+    PROMPT_BANNER = ("--- Perseus Vault MCP Server Configuration ---")
+    r = run_installer(home, token="valid-looking-token", gate_root=stub,
+                      tty_stdin=True)
+    out = r.stdout + r.stderr
+    low = out.lower()
     problems = []
     if getattr(r, "timed_out", False):
         problems.append("TIMEOUT: not evidence that the gate aborted")
     if r.returncode == 0:
         problems.append("no abort despite broken host")
-    if "contract" not in out and "gate" not in out:
-        problems.append("gate failure not reported first")
+    if "contract" not in low and "gate" not in low:
+        problems.append("no explicit gate reason in output")
+    if PROMPT_BANNER in out:
+        problems.append("prompt banner emitted: gate did not abort "
+                        "before the prompt layer")
     if snapshot(home) != before:
         problems.append("files written despite gate failure")
     return (not problems), "; ".join(problems)
@@ -834,10 +869,15 @@ def g4_positive(tmp, mode, label_home):
     home = tmp / f"{label_home}-home"
     home.mkdir()
     stub = make_stub(tmp / f"{label_home}-host", mm_mode=mode)
-    r = run_installer(home, gate_root=stub)
-    # review 10 (F-B1): passing the gate is demonstrated by the
-    # installation proceeding and writing its artifacts, not by a
-    # non-empty snapshot dict (which always carries the ROOT entry).
+    r = run_installer(home, gate_root=stub, timeout=FULL_INSTALL_TIMEOUT)
+    # review 11 (F-B1): a positive is success + artifacts. Writing
+    # both files and then failing is NOT a pass.
+    if getattr(r, "timed_out", False):
+        return False, f"TIMEOUT with real-shape mirror {mode}"
+    if r.returncode != 0:
+        return False, (f"installer exited {r.returncode} with "
+                       f"real-shape mirror {mode} "
+                       f"(tail: {(r.stdout + r.stderr)[-300:]})")
     missing = [str(p) for p in
                (home / "plugins" / "perseus-vault" / "plugin.yaml",
                 home / "plugins" / "perseus-vault" / "provider.py")

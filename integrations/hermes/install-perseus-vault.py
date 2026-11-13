@@ -263,6 +263,11 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
     if len(lambdas) != 1:
         return False
     cb = lambdas[0]
+    # review 13: the installed call passes exactly (label, callback)
+    # as positionals. Extra positionals could occupy parameters that
+    # select the iterable; nothing here justifies them.
+    if len(hc.args) != 2 or hc.args.index(cb) != 1:
+        return False
     if any(a.arg == pk for a in cb.args.args):
         return False
     if not cb.args.args:
@@ -392,6 +397,13 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
 
     helper_params = {a.arg for a in
                      list(helper.args.args) + list(helper.args.kwonlyargs)}
+    # review 13: keywords of the helper call. The installed call
+    # uses level= (a real kwonly parameter). ** unpacking could
+    # smuggle in an override, and unknown keywords do not match the
+    # real signature: both fail closed.
+    for kw in hc.keywords:
+        if kw.arg is None or kw.arg not in helper_params:
+            return False
 
     def host_iter(node):
         # reviews 8 and 10 (G4-B2): the loop must iterate the
@@ -487,6 +499,13 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
             # empty) collection, while still matching the shape.
             if isinstance(s.iter, ast_mod.IfExp):
                 _param = s.iter.test.left.id
+                # review 13: the CALL must not override the iterable
+                # the recognizer just validated: providers=[] as an
+                # explicit argument makes the loop iterate an empty
+                # (or foreign) collection, and initialize() is then
+                # guaranteed for no provider at all.
+                if any(kw.arg == _param for kw in hc.keywords):
+                    return False
                 if any(writes_name(prev, _param)
                        for prev in helper.body[:hi]):
                     continue

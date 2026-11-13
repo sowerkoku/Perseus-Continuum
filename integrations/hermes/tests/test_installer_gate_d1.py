@@ -549,6 +549,23 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
                       '                if providers is None\n'
                       '                else providers):\n'
                       '            call(provider)\n')
+        elif mm_mode == "call_overrides_providers":
+            # negative (review 13): helper in the accepted IfExp
+            # form, but the CALL passes providers=[] explicitly:
+            # the loop iterates an empty collection, so initialize()
+            # is guaranteed for no provider.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        self._each_provider("initialize failed",\n'
+                      '            lambda p: p.initialize(\n'
+                      '                session_id=session_id, **kwargs),\n'
+                      '            providers=[])\n'
+                    + '    def _each_provider(self, label, call, *,\n'
+                      '                       providers=None):\n'
+                      '        for provider in (self._providers\n'
+                      '                if providers is None\n'
+                      '                else providers):\n'
+                      '            call(provider)\n')
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + '        self._ready = True\n') + helper
@@ -917,6 +934,11 @@ def g4_suite(tmp):
     yield ("G4n43 IfExp parameter reassigned before loop -> abort",
            lambda: expect_abort(tmp, "g4n43",
                                 {"mm_mode": "param_pre_rebind"},
+                                "propagates"))
+    # negative from the thirteenth review (effective call arguments):
+    yield ("G4n44 helper call with providers=[] -> abort",
+           lambda: expect_abort(tmp, "g4n44",
+                                {"mm_mode": "call_overrides_providers"},
                                 "propagates"))
 
 

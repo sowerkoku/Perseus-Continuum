@@ -297,10 +297,15 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
             allowed_ids.add(id(n))
     for kw in kw_unpack:
         allowed_ids.add(id(kw.value))
-    for n in ast_mod.walk(g_store):
+    # review 10 (G4-B4): ONLY the store's target base is allowed;
+    # the RHS must not reference kwargs at all. kwargs.clear() /
+    # kwargs.pop(...) as a VALUE mutate the dict before
+    # initialization, and the observed host RHS
+    # (str(get_hermes_home())) never touches kwargs.
+    allowed_ids.add(id(g_store.targets[0].value))
+    for n in ast_mod.walk(g_store.value):
         if isinstance(n, ast_mod.Name) and n.id == pk:
-            # the guard's own store is the single permitted write
-            allowed_ids.add(id(n))
+            return False
     for n in ast_mod.walk(fn_node):
         if (isinstance(n, ast_mod.Subscript)
                 and isinstance(n.value, ast_mod.Name)
@@ -380,24 +385,19 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
                 and len(v.args) == 1
                 and is_cb_call(v.args[0]))
 
-    def scan_direct(stmt, loopvar):
-        # direct flow inside the loop: descending ONLY through
-        # try/finally (the observed wrapper). Not through any other
-        # compound statement.
-        if isinstance(stmt, ast_mod.Try):
-            for s in stmt.body + getattr(stmt, "finalbody", []):
-                if direct_call_in(s, loopvar):
-                    invoked[0] = True
-            return
-        if direct_call_in(stmt, loopvar):
-            invoked[0] = True
+    helper_params = {a.arg for a in
+                     list(helper.args.args) + list(helper.args.kwonlyargs)}
 
     def host_iter(node):
-        # review 8: the loop must iterate the providers list, in one
-        # of the two observed forms: the plain attribute, or the
-        # installed host's selection expression
-        # `self._providers if providers is None else providers`.
-        # Empty tuples and foreign iterables prove no real iteration.
+        # reviews 8 and 10 (G4-B2): the loop must iterate the
+        # providers list in one of the two observed forms: the plain
+        # attribute, or the COMPLETE installed selection expression
+        #   self._providers if providers is None else providers
+        # where the tested name is a real parameter of the helper
+        # and the else-branch is that same parameter. Any other
+        # condition or branch (`if False else empty_providers`,
+        # foreign names) is rejected: it may select an empty or
+        # unrelated collection.
         if (isinstance(node, ast_mod.Attribute)
                 and isinstance(node.value, ast_mod.Name)
                 and node.value.id == "self"
@@ -405,7 +405,53 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
             return True
         return (isinstance(node, ast_mod.IfExp)
                 and host_iter(node.body)
-                and isinstance(node.orelse, ast_mod.Name))
+                and isinstance(node.test, ast_mod.Compare)
+                and len(node.test.ops) == 1
+                and isinstance(node.test.ops[0], ast_mod.Is)
+                and isinstance(node.test.left, ast_mod.Name)
+                and node.test.left.id in helper_params
+                and len(node.test.comparators) == 1
+                and isinstance(node.test.comparators[0], ast_mod.Constant)
+                and node.test.comparators[0].value is None
+                and isinstance(node.orelse, ast_mod.Name)
+                and node.orelse.id == node.test.left.id)
+
+    def writes_name(stmt, name):
+        # review 10 (G4-B3): any write (Store/Del) of the loop
+        # variable: rebinding means call(<loopvar>) no longer
+        # denotes the iterated provider.
+        for n in ast_mod.walk(stmt):
+            if (isinstance(n, ast_mod.Name) and n.id == name
+                    and isinstance(n.ctx, (ast_mod.Store, ast_mod.Del))):
+                return True
+        return False
+
+    stop = [False]
+
+    def scan_sequence(stmts, loopvar):
+        # review 10 (G4-B1): walk one executable statement sequence.
+        # Stop at the first unconditional terminator, including one
+        # inside try: a return/raise at the start of a try body
+        # exits the function, so everything after it (in the try AND
+        # after the try) is unreachable. Also stop at any write to
+        # the loop variable before a direct call is found.
+        for stmt in stmts:
+            if stop[0]:
+                return
+            if isinstance(stmt, (ast_mod.Return, ast_mod.Raise)):
+                stop[0] = True
+                return
+            if isinstance(stmt, ast_mod.Try):
+                scan_sequence(stmt.body, loopvar)
+                if not stop[0]:
+                    scan_sequence(getattr(stmt, "finalbody", []),
+                                  loopvar)
+                continue
+            if writes_name(stmt, loopvar):
+                return
+            if direct_call_in(stmt, loopvar):
+                invoked[0] = True
+                return
 
     for s in helper.body:
         # reachable statements only: stop at the first unconditional
@@ -417,8 +463,7 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
                 continue
             if not host_iter(s.iter):
                 continue
-            for stmt in s.body:
-                scan_direct(stmt, s.target.id)
+            scan_sequence(s.body, s.target.id)
     return invoked[0]
 
 

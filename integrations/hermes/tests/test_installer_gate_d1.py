@@ -438,6 +438,59 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
                       '        raise RuntimeError("stop")\n'
                       '        for provider in self._providers:\n'
                       '            call(provider)\n')
+        elif mm_mode == "iter_badcond":
+            # negative (review 10, G4-B2): IfExp with an unverified
+            # condition and a foreign else-branch.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in (self._providers\n'
+                      '                          if False\n'
+                      '                          else empty_providers):\n'
+                      '            call(provider)\n')
+        elif mm_mode == "loop_return":
+            # negative (G4-B1): return inside the loop body before
+            # the call.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in self._providers:\n'
+                      '            return []\n'
+                      '            call(provider)\n')
+        elif mm_mode == "try_return":
+            # negative (G4-B1): return at the start of a try body:
+            # the function exits; the call after the try never runs.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in self._providers:\n'
+                      '            try:\n'
+                      '                return []\n'
+                      '            except Exception:\n'
+                      '                pass\n'
+                      '            call(provider)\n')
+        elif mm_mode == "loop_rebind":
+            # negative (G4-B3): the loop variable is rebound before
+            # the call: call(provider) no longer denotes a provider.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in self._providers:\n'
+                      '            provider = None\n'
+                      '            call(provider)\n')
+        elif mm_mode == "store_clear":
+            # negative (G4-B4): the guard store's VALUE mutates
+            # kwargs (clear() empties the dict).
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        if "hermes_home" not in kwargs:\n'
+                    '            kwargs["hermes_home"] = kwargs.clear()\n'
+                    + call_cb) + helper
+        elif mm_mode == "store_pop":
+            # negative (G4-B4): the store's VALUE pops from kwargs.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    '        if "hermes_home" not in kwargs:\n'
+                    '            kwargs["hermes_home"] = kwargs.pop("x")\n'
+                    + call_cb) + helper
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + '        self._ready = True\n') + helper
@@ -458,8 +511,14 @@ def f0(tmp):
     home.mkdir()
     stub = make_stub(tmp / "f0-host")
     r = run_installer(home, gate_root=stub)
-    if not snapshot(home):
-        return False, f"installer wrote nothing even with a full host (output tail: {r.stdout[-200:]})"
+    # review 10 (F-B1): snapshot() truthiness is not an assertion;
+    # verify the concrete artifacts the installer must write.
+    expect = [home / "plugins" / "perseus-vault" / "plugin.yaml",
+              home / "plugins" / "perseus-vault" / "provider.py"]
+    missing = [str(p) for p in expect if not p.is_file()]
+    if missing:
+        return False, (f"installer artifacts missing with a full host: "
+                       f"{missing} (output tail: {r.stdout[-200:]})")
     return True, ""
 
 
@@ -747,6 +806,25 @@ def g4_suite(tmp):
            lambda: expect_abort(tmp, "g4n33",
                                 {"mm_mode": "raise_before_loop"},
                                 "propagates"))
+    # negative table from the tenth review (G4-B1..B4):
+    yield ("G4n34 iter IfExp with unverified condition -> abort",
+           lambda: expect_abort(tmp, "g4n34", {"mm_mode": "iter_badcond"},
+                                "propagates"))
+    yield ("G4n35 return inside loop body before call -> abort",
+           lambda: expect_abort(tmp, "g4n35", {"mm_mode": "loop_return"},
+                                "propagates"))
+    yield ("G4n36 return at start of try body -> abort",
+           lambda: expect_abort(tmp, "g4n36", {"mm_mode": "try_return"},
+                                "propagates"))
+    yield ("G4n37 loop variable rebound before call -> abort",
+           lambda: expect_abort(tmp, "g4n37", {"mm_mode": "loop_rebind"},
+                                "propagates"))
+    yield ("G4n38 guard store RHS kwargs.clear() -> abort",
+           lambda: expect_abort(tmp, "g4n38", {"mm_mode": "store_clear"},
+                                "propagates"))
+    yield ("G4n39 guard store RHS kwargs.pop() -> abort",
+           lambda: expect_abort(tmp, "g4n39", {"mm_mode": "store_pop"},
+                                "propagates"))
 
 
 def g4_positive(tmp, mode, label_home):
@@ -757,8 +835,16 @@ def g4_positive(tmp, mode, label_home):
     home.mkdir()
     stub = make_stub(tmp / f"{label_home}-host", mm_mode=mode)
     r = run_installer(home, gate_root=stub)
-    if not snapshot(home):
-        return False, (f"gate rejected real-shape mirror {mode} "
+    # review 10 (F-B1): passing the gate is demonstrated by the
+    # installation proceeding and writing its artifacts, not by a
+    # non-empty snapshot dict (which always carries the ROOT entry).
+    missing = [str(p) for p in
+               (home / "plugins" / "perseus-vault" / "plugin.yaml",
+                home / "plugins" / "perseus-vault" / "provider.py")
+               if not p.is_file()]
+    if missing:
+        return False, (f"gate rejected real-shape mirror {mode}: "
+                       f"artifacts missing {missing} "
                        f"(tail: {(r.stdout + r.stderr)[-200:]})")
     return True, ""
 
@@ -844,10 +930,13 @@ def l4(tmp):
     (chain / "bin").mkdir(parents=True)
     w = chain / "bin" / "hermes"
     joined = "'\"'\"'" + str(host) + "'\"'\"'"
-    body = ("import sys\nsys.path.insert(0, " + joined
-            + ")\nprint('stub')")
+    # review 10 (F-B2): the whole program is ONE single-quoted -c
+    # argument, exactly like the installed launcher; inner program
+    # quotes avoided so the only quoting is the path's '"'"' join.
+    prog = ("'import sys\nsys.path.insert(0, " + joined
+            + ")\nprint(\"stub\")\n'")
     w.write_text("#!/bin/sh\nexec /usr/bin/python3 -I -c "
-                 + body + ' "$@"\n')
+                 + prog + ' "$@"\n')
     w.chmod(0o755)
     r = gate_probe(path_prepend=chain / "bin")
     if f"GATE_OK 0.23.1 {host}" not in r.stdout:

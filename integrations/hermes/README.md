@@ -336,7 +336,16 @@ The provider resolves config in this order: **env vars → config.yaml
    `hermes_home`; declared version must match the embedded
    `plugin.yaml`. Version is read from the installed host itself
    (never inferred from the installer). Any unverifiable condition
-   aborts with a non-zero exit and ZERO files created or modified.
+   aborts with a non-zero exit before any installer write: no `.env`,
+   plugin file, or config change is produced by a rejected run. The
+   gate additionally sets `sys.dont_write_bytecode = True` before
+   importing host modules, and Suite F proves, for the tested scope:
+   a full-tree snapshot (contents, structure, modes, root directory)
+   of an isolated stub host is byte-identical across a gate run
+   (GRO), and the real host's `.pyc` index (path/size/mtime) is
+   unchanged (F6b). This is a bytecode-write guarantee plus the
+   tested-scope snapshot evidence; it is NOT a general claim that any
+   possible host-module import is free of all side effects.
    `PERSEUS_GATE_HOST_ROOT` is a strict test/diagnostic seam (the
    given root is the only one considered; no fallback). Enforced by
    `tests/test_installer_gate_d1.py` (Suite F).

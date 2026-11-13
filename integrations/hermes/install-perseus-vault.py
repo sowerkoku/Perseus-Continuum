@@ -171,7 +171,12 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
        (statement level, descending only through try/finally, the
        observed wrapper) calls call(<loop variable>) directly. A
        call under an if/match/inner loop is not evidence. The
-       callback parameter is never stored or rebound.
+       callback parameter is never stored or rebound. The scan
+       stops at return/raise/break/continue and at ANY write to
+       the loop variable — including inside a try, which
+       invalidates the containing sequence. The IfExp iterator is
+       accepted only in the complete installed form AND only if
+       its parameter has no write before the loop.
     """
     pk = fn_node.args.kwarg.arg if fn_node.args.kwarg else None
     if not pk:
@@ -438,7 +443,13 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
         for stmt in stmts:
             if stop[0]:
                 return
-            if isinstance(stmt, (ast_mod.Return, ast_mod.Raise)):
+            # review 12 (G4-B1): break/continue also terminate the
+            # current sequence of the loop body: code after them is
+            # unreachable for that iteration (they cannot legally
+            # appear outside a loop body, so this is not general
+            # flow analysis).
+            if isinstance(stmt, (ast_mod.Return, ast_mod.Raise,
+                                 ast_mod.Break, ast_mod.Continue)):
                 stop[0] = True
                 return
             if isinstance(stmt, ast_mod.Try):
@@ -447,13 +458,19 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
                     scan_sequence(getattr(stmt, "finalbody", []),
                                   loopvar)
                 continue
+            # review 12 (G4-B3): a write to the loop variable must
+            # invalidate the CONTAINING sequence as well: after
+            # 'try: provider = None', the call AFTER the try uses a
+            # rebound variable, so stop must propagate out of the
+            # try (fail closed: the finalbody is not scanned).
             if writes_name(stmt, loopvar):
+                stop[0] = True
                 return
             if direct_call_in(stmt, loopvar):
                 invoked[0] = True
                 return
 
-    for s in helper.body:
+    for hi, s in enumerate(helper.body):
         # reachable statements only: stop at the first unconditional
         # terminator at this level
         if isinstance(s, (ast_mod.Return, ast_mod.Raise)):
@@ -463,6 +480,16 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
                 continue
             if not host_iter(s.iter):
                 continue
+            # review 12 (G4-B2): the parameter selected by the
+            # IfExp iterator must be intact BEFORE the loop. A
+            # reassignment like `providers = []` above the loop
+            # makes the expression select an unrelated (possibly
+            # empty) collection, while still matching the shape.
+            if isinstance(s.iter, ast_mod.IfExp):
+                _param = s.iter.test.left.id
+                if any(writes_name(prev, _param)
+                       for prev in helper.body[:hi]):
+                    continue
             scan_sequence(s.body, s.target.id)
     return invoked[0]
 

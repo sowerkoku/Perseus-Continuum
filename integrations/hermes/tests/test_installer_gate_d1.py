@@ -506,6 +506,49 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
                     '        if "hermes_home" not in kwargs:\n'
                     '            kwargs["hermes_home"] = kwargs.pop("x")\n'
                     + call_cb) + helper
+        elif mm_mode == "try_rebind_loopvar":
+            # negative (review 12, G4-B3): loop variable rebound
+            # INSIDE a try; the call after the try receives a
+            # rebound variable. Invalidation must propagate out.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in self._providers:\n'
+                      '            try:\n'
+                      '                provider = None\n'
+                      '            finally:\n'
+                      '                pass\n'
+                      '            call(provider)\n')
+        elif mm_mode == "loop_continue":
+            # negative (review 12, G4-B1): continue before the
+            # call: unreachable in every iteration.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in self._providers:\n'
+                      '            continue\n'
+                      '            call(provider)\n')
+        elif mm_mode == "loop_break":
+            # negative (review 12, G4-B1): break before the call.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call):\n'
+                      '        for provider in self._providers:\n'
+                      '            break\n'
+                      '            call(provider)\n')
+        elif mm_mode == "param_pre_rebind":
+            # negative (review 12, G4-B2): the IfExp parameter is
+            # reassigned before the loop: the expression still
+            # matches the installed shape but selects [] instead.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard + call_cb
+                    + '    def _each_provider(self, label, call, *,\n'
+                      '                       providers=None):\n'
+                      '        providers = []\n'
+                      '        for provider in (self._providers\n'
+                      '                if providers is None\n'
+                      '                else providers):\n'
+                      '            call(provider)\n')
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + '        self._ready = True\n') + helper
@@ -859,6 +902,21 @@ def g4_suite(tmp):
                                 "propagates"))
     yield ("G4n39 guard store RHS kwargs.pop() -> abort",
            lambda: expect_abort(tmp, "g4n39", {"mm_mode": "store_pop"},
+                                "propagates"))
+    # negative table from the twelfth review (G4-B1..B3):
+    yield ("G4n40 loop var rebound inside try, call after -> abort",
+           lambda: expect_abort(tmp, "g4n40",
+                                {"mm_mode": "try_rebind_loopvar"},
+                                "propagates"))
+    yield ("G4n41 continue before call in loop body -> abort",
+           lambda: expect_abort(tmp, "g4n41", {"mm_mode": "loop_continue"},
+                                "propagates"))
+    yield ("G4n42 break before call in loop body -> abort",
+           lambda: expect_abort(tmp, "g4n42", {"mm_mode": "loop_break"},
+                                "propagates"))
+    yield ("G4n43 IfExp parameter reassigned before loop -> abort",
+           lambda: expect_abort(tmp, "g4n43",
+                                {"mm_mode": "param_pre_rebind"},
                                 "propagates"))
 
 

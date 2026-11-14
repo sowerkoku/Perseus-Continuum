@@ -397,12 +397,17 @@ def _gate_proves_key_passed(fn_node, cls_node, ast_mod, key: str) -> bool:
 
     helper_params = {a.arg for a in
                      list(helper.args.args) + list(helper.args.kwonlyargs)}
-    # review 13: keywords of the helper call. The installed call
-    # uses level= (a real kwonly parameter). ** unpacking could
-    # smuggle in an override, and unknown keywords do not match the
-    # real signature: both fail closed.
+    # reviews 13-14: keywords of the helper call bind ONLY the
+    # keyword-only parameters of the real signature (installed:
+    # level, providers, exc_info; level= is used by the installed
+    # call and must pass). ** unpacking could smuggle in an
+    # override, and a keyword naming a POSITIONAL parameter
+    # (label=, call=) duplicates the positional: CPython raises
+    # TypeError, the helper never runs and no provider is
+    # initialized. All fail closed.
+    kwonly_params = {a.arg for a in helper.args.kwonlyargs}
     for kw in hc.keywords:
-        if kw.arg is None or kw.arg not in helper_params:
+        if kw.arg is None or kw.arg not in kwonly_params:
             return False
 
     def host_iter(node):

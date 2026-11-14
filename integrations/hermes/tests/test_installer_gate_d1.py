@@ -566,6 +566,27 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
                       '                if providers is None\n'
                       '                else providers):\n'
                       '            call(provider)\n')
+        elif mm_mode == "call_kw_dupe":
+            # negative (review 14): keyword call= duplicating the
+            # positional callback: CPython raises TypeError, the
+            # helper never runs, no provider is initialized.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        self._each_provider("initialize failed",\n'
+                      '            lambda p: p.initialize(\n'
+                      '                session_id=session_id, **kwargs),\n'
+                      '            call=other)\n'
+                    + helper)
+        elif mm_mode == "label_kw_dupe":
+            # negative (review 14): keyword label= duplicating the
+            # first positional. Same failure mode.
+            body = ('    def initialize_all(self, session_id, **kwargs):\n'
+                    + guard
+                    + '        self._each_provider("initialize failed",\n'
+                      '            lambda p: p.initialize(\n'
+                      '                session_id=session_id, **kwargs),\n'
+                      '            label="segundo")\n'
+                    + helper)
         elif mm_mode == "nocall":
             body = ('    def initialize_all(self, session_id, **kwargs):\n'
                     + guard + '        self._ready = True\n') + helper
@@ -939,6 +960,13 @@ def g4_suite(tmp):
     yield ("G4n44 helper call with providers=[] -> abort",
            lambda: expect_abort(tmp, "g4n44",
                                 {"mm_mode": "call_overrides_providers"},
+                                "propagates"))
+    # negatives from the fourteenth review (keyword binding):
+    yield ("G4n45 keyword call= duplicates positional callback -> abort",
+           lambda: expect_abort(tmp, "g4n45", {"mm_mode": "call_kw_dupe"},
+                                "propagates"))
+    yield ("G4n46 keyword label= duplicates positional label -> abort",
+           lambda: expect_abort(tmp, "g4n46", {"mm_mode": "label_kw_dupe"},
                                 "propagates"))
 
 

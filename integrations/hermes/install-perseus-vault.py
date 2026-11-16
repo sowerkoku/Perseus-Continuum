@@ -776,6 +776,27 @@ logger = logging.getLogger(__name__)
 _DEFAULT_URL = "http://localhost:8767/message"
 _PREFETCH_LIMIT = 6
 _PREVIEW_CAP = 400
+
+# Query normalization for recall (defect D-1, 2026-11-15): FTS OR over
+# function words returns a decay-ranked global top-k identical for every
+# message, i.e. noise, not recall. Recall therefore runs on normalized
+# keywords only; an empty normalization means "no semantic signal" and
+# the recall call is skipped entirely (nothing is injected, by design).
+_FTS_STOPWORDS = frozenset("""
+a al algo algun alguna algunas alguno algunos antes ante aquel aquella aquellas
+aquello aquellos asi con como cual cuando de del desde donde el ella ellas ellos
+en era eran es esa esas ese eso esos esta estaban este estos estoy fue fueron
+fui ha haber hasta hay la las le les lo los me mi mis modo mucho muchos muy mas
+mas me nada ni nos nosotros nuestro o os para pero poco por porque que quien
+se segun si sin sobre solo su sus tambien te tener ti tiene tienen todo todos
+tu tus un una unas uno unos usted ustedes y ya yo
+i me my we our you your he she it they this that what when where which who whom
+how do does did is are was were be been being have has had will would can could
+should shall may might must of in on at to for from with without about into over
+under again then once here there all any both each few more most other some such
+no nor not only own same so than too very just now
+hola adios adi okay ok vale dale hey hola gracias favor oye ups listo
+""".split())
 _SESSION_CAPTURE_MAX_CHARS = 8000
 _TURN_BUFFER_CAP = 40
 # The host (MemoryManager._prefetch_provider) runs prefetch() inside a thread
@@ -2500,14 +2521,46 @@ class PerseusVaultProvider(MemoryProvider):
             logger.debug("perseus-vault: synchronous prefetch failed: %s", e)
             return ""
 
+    @staticmethod
+    def _fts_query(text: str) -> str:
+        """Normalize a message into an FTS keyword query (defect D-1).
+
+        - lowercase, strip accents and punctuation.
+        - drop common function words: OR over them returns the same
+          decay-ranked global top-k for every message (noise, not recall)
+          and an all-function-word expression can 500 the server preview
+          path.
+        - keep any token containing a digit (versions, host suffixes).
+        - preserve order, deduplicate.
+
+        Returns "" when nothing meaningful remains. Callers MUST skip the
+        recall call in that case: an empty normalization is the absence of
+        semantic signal, never an empty match expression. This is not
+        stemming and not synonym expansion: keyword hygiene only.
+        """
+        if not text:
+            return ""
+        norm = unicodedata.normalize("NFKD", text.lower())
+        norm = "".join(c for c in norm if not unicodedata.combining(c))
+        toks = re.findall(r"[a-z0-9][a-z0-9._-]*", norm)
+        kept = [t for t in toks
+                if any(ch.isdigit() for ch in t)
+                or (t not in _FTS_STOPWORDS and len(t) >= 2)]
+        return " ".join(dict.fromkeys(kept))
+
     def _build_recall_block(self, query: str,
                             call_timeout: float = _WARM_CALL_TIMEOUT) -> str:
         items: List[Dict[str, Any]] = []
         seen: set = set()
 
+        fts = self._fts_query(query)
+        if not fts:
+            # No semantic signal: no call, no injection (by design).
+            return ""
+
         res = self._client.call_tool(
             "perseus_vault_recall_when",
-            {"context": query, "limit": 4, **self._ws_args()},
+            {"context": fts, "limit": 4, **self._ws_args()},
             timeout=call_timeout)
         for it in self._extract_items(res):
             if it.get("id") not in seen:
@@ -2516,9 +2569,20 @@ class PerseusVaultProvider(MemoryProvider):
 
         res = self._client.call_tool(
             "perseus_vault_recall",
-            {"query": query, "limit": _PREFETCH_LIMIT,
+            {"query": fts, "limit": _PREFETCH_LIMIT,
              "preview_cap": _PREVIEW_CAP, **self._ws_args()},
             timeout=call_timeout)
+        if not res.get("ok"):
+            # Bounded single retry: the server preview truncation slices
+            # body_json by BYTES and panics when the cap lands inside a
+            # multi-byte character (open server defect; HTTP 500).
+            # Without preview_cap the full body is returned and
+            # _item_text truncates locally. Exactly one retry, never a
+            # loop.
+            res = self._client.call_tool(
+                "perseus_vault_recall",
+                {"query": fts, "limit": _PREFETCH_LIMIT, **self._ws_args()},
+                timeout=call_timeout)
         for it in self._extract_items(res):
             if it.get("id") not in seen:
                 seen.add(it.get("id"))
@@ -3598,7 +3662,8 @@ def cmd_recall(args) -> int:
                 payload = json.loads(inner)
             except Exception:
                 pass
-        entities = payload.get("entities") or []
+        entities = (payload.get("items") or payload.get("results")
+                    or payload.get("entities") or [])
         print(f"Found {len(entities)} entities:")
         for e in entities:
             print(f"  - [{e.get('category')}/{e.get('key')}] "
@@ -3629,7 +3694,8 @@ def cmd_semantic(args) -> int:
                 payload = json.loads(inner)
             except Exception:
                 pass
-        entities = payload.get("entities") or []
+        entities = (payload.get("items") or payload.get("results")
+                    or payload.get("entities") or [])
         print(f"Found {len(entities)} entities:")
         for e in entities:
             print(f"  - [{e.get('category')}/{e.get('key')}] "

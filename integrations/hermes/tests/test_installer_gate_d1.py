@@ -602,11 +602,20 @@ def make_stub(root: Path, *, version="0.23.1", sct=True, oss="full",
 # and writes (it must before and after the gate exists).
 # ---------------------------------------------------------------------
 
-# full-install runs (gate PASS + real writes) take 33-40 s on this
-# ARM board at ~1.5 load, measured; negatives abort at the gate in
-# <1 s. The two full-install cases get a real margin so a timeout
-# means a genuine hang, not a tight harness constant.
-FULL_INSTALL_TIMEOUT = 180
+# Full-install runs (gate PASS + real writes) are slow BY DESIGN: the
+# positive exercises the production path end to end, which includes
+# FOUR real Hermes CLI startups (installer lines 75, 4005, 4023, 4033:
+# --version, plugins enable, config set, memory status). Measured on
+# this ARM board (Nov-2026): 'hermes --version' 3.1 s, 'hermes memory
+# status' 13.9 s cold; the whole case in isolation 117 s. Inside the
+# suite the four cold CLI starts plus the suite's own load exceed the
+# previous 180 s bound (reproduced 3/3 attempts; every other case,
+# including the real-host F6b positive, passes). Negatives still abort
+# at the gate in <1 s and keep the tight default timeout. The bound
+# below carries the measured worst case with headroom for concurrent
+# load; the pass criterion is UNCHANGED (exit 0 + written artifacts),
+# so a timeout still means a genuine hang, not a tight constant.
+FULL_INSTALL_TIMEOUT = 360
 
 
 def f0(tmp):

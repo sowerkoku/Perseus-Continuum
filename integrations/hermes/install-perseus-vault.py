@@ -29,6 +29,7 @@ Versioned line (contract with users — see integrations/hermes/README.md):
   writing any file. Widening support requires an explicit contract review.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -105,15 +106,22 @@ def get_hermes_home() -> Path:
 
 
 # ===========================================================================
-# Version support declaration (line 0.3.0). These constants are a contract
+# Version support declaration (current line 0.4.x). These constants are a contract
 # with users: changing any value requires re-reviewing the documented
 # contracts in integrations/hermes/README.md against the host's exact code.
-# The next line (0.4.x) is independent and NOT retro-compatible: it will
-# target Hermes v0.23.1 exclusively, with a hard pre-write gate.
+# The 0.4.x line is the CURRENT line and is NOT retro-compatible with 0.3.x:
+# it targets Hermes v0.23.1 exclusively, with a hard pre-write gate.
 # ===========================================================================
 
-PLUGIN_VERSION = "0.3.0"            # must match the embedded PLUGIN_YAML below
-SUPPORTED_HERMES_MIN = "0.20.0"    # documented floor of the 0.3.0 line
+# Integration series version == the git release tag of this repo
+# (perseus-vault-hermes-vX.Y.Z). Checked against the installed host's
+# manifest parser (hermes_cli/plugins_manifest.py L521/L571): the plugin
+# 'version' field is a free string - no format, no range, no warning -
+# and the schema gate is manifest_version (int; absent = v1, supported).
+# Keep this and the embedded PLUGIN_YAML in lockstep; the match is
+# enforced at runtime below (plugin_yaml_version consistency check).
+PLUGIN_VERSION = "0.4.2"            # must match the embedded PLUGIN_YAML below
+SUPPORTED_HERMES_MIN = "0.20.0"    # documented floor inherited from the 0.3.x line
 VERIFIED_HERMES_CEILING = "0.23.1" # highest Hermes version verified for this line
 
 
@@ -695,8 +703,11 @@ def check_host_contract(host_root=None) -> str:
 # Plugin files content
 # ===========================================================================
 
-PLUGIN_YAML = r"""name: perseus-vault
-version: "0.3.0"
+# Embedded plugin manifest: version is INTERPOLATED from PLUGIN_VERSION —
+# single source by construction. plugin_yaml_version() + the runtime
+# consistency checks in main()/check_host_contract() remain as defense.
+PLUGIN_YAML = f"""name: perseus-vault
+version: "{PLUGIN_VERSION}"
 description: "Perseus Vault memory provider via MCP HTTP — persistent, cross-session knowledge with semantic search and bi-temporal queries"
 author: "Perseus Computing"
 cli_commands:
@@ -3588,16 +3599,30 @@ def _get_client() -> MCPClient:
     return client
 
 
+def _installed_manifest_version() -> str:
+    """Version declared by the plugin.yaml installed next to this file."""
+    try:
+        p = Path(__file__).resolve().parent / "plugin.yaml"
+        for line in p.read_text(encoding="utf-8").splitlines():
+            if line.startswith("version:"):
+                return line.split(":", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return "unknown"
+
+
 def cmd_status(args) -> int:
     try:
         client = _get_client()
         print("Provider: perseus-vault")
+        print(f"Version: {_installed_manifest_version()}")
         print("Connected: True")
         print(f"  URL: {client.url}")
         tools = client.list_tools()
         print(f"  Tools available: {len(tools)}")
     except Exception as e:
         print("Provider: perseus-vault")
+        print(f"Version: {_installed_manifest_version()}")
         print("Connected: False")
         print(f"  Error: {e}")
         return 1
@@ -3809,6 +3834,9 @@ def write_plugin_files(plugin_dir: Path) -> None:
     for name, content in files.items():
         (plugin_dir / name).write_text(content)
     log_ok("Plugin files created")
+    for name in files:
+        digest = hashlib.sha256((plugin_dir / name).read_bytes()).hexdigest()[:12]
+        log_ok(f"  {name}: sha256 {digest}")
 
 
 def merge_json_config(config_file: Path, url: str, workspace: str) -> dict:
@@ -3905,6 +3933,10 @@ def _now_stamp() -> str:
 def main() -> int:
     print("=" * 60)
     print("  Perseus Vault Memory Provider Installer for Hermes")
+    print(f"  Integration version: {PLUGIN_VERSION}")
+    for _n, _s in (("plugin.yaml", PLUGIN_YAML), ("__init__.py", INIT_PY),
+                   ("provider.py", PROVIDER_PY), ("cli.py", CLI_PY)):
+        print(f"    {_n}: sha256 {hashlib.sha256(_s.encode()).hexdigest()[:12]}")
     print("=" * 60)
     print()
 

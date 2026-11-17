@@ -18,6 +18,11 @@ Defects under test (operational cycle 2026-11-15, server issues #10/#11):
   M0 meta (fail-first): R2/R3/R6 MUST fail against the released 0.4.0
      installer (e6a38bbd) - a test that passes against uncorrected code
      proves nothing.
+  H  version traceability (0.4.2): PLUGIN_VERSION == embedded plugin.yaml;
+     the banner prints the integration version and per-asset SHA-256s
+     (verified equal to the module's assets), before the fail-closed gate;
+     the gate still writes nothing; the installed CLI status prints the
+     version declared by the installed plugin.yaml.
 """
 import ast
 import subprocess
@@ -163,6 +168,38 @@ def main():
     recalls = [ca for ca in c.calls if ca[0] == "perseus_vault_recall"]
     check("M0 released provider had no preview fallback",
           len(recalls) == 1)
+
+    print("== H version traceability (0.4.2) ==")
+    cur = INSTALLER.read_text(encoding="utf-8")
+    ns = {"__name__": "inst_under_test", "__file__": str(INSTALLER)}
+    exec(compile(cur, str(INSTALLER), "exec"), ns)
+    v = ns["PLUGIN_VERSION"]
+    check("H1 declared version == embedded plugin.yaml",
+          v == ns["plugin_yaml_version"]() and f'version: "{v}"' in ns["PLUGIN_YAML"])
+    import hashlib as _hl
+    import os as _os
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as td:
+        gate = Path(td) / "empty-gate"
+        gate.mkdir()
+        home = Path(td) / "empty-home"
+        home.mkdir()
+        env = dict(__import__("os").environ)
+        env.update({"PERSEUS_GATE_HOST_ROOT": str(gate), "HERMES_HOME": str(home)})
+        r = subprocess.run([sys.executable, str(INSTALLER)], capture_output=True,
+                           text=True, timeout=30, env=env, input="")
+        out = r.stdout
+        want = _hl.sha256(ns["PROVIDER_PY"].encode()).hexdigest()[:12]
+        check("H2 banner prints integration version",
+              f"Integration version: {v}" in out)
+        check("H2 banner asset digest == module asset digest",
+              f"provider.py: sha256 {want}" in out)
+        check("H2 gate still fail-closed: no writes, rc=1",
+              r.returncode == 1 and not any(home.rglob("*")))
+    cli = get_asset(cur, "CLI_PY")
+    check("H3 CLI status reads installed plugin.yaml and prints version",
+          cli.count("_installed_manifest_version()") >= 2
+          and 'print(f"Version:' in cli)
 
     print(f"\nG: {PASS}/{PASS + FAIL}")
     return 0 if FAIL == 0 else 1

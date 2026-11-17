@@ -23,6 +23,12 @@ Defects under test (operational cycle 2026-11-15, server issues #10/#11):
      (verified equal to the module's assets), before the fail-closed gate;
      the gate still writes nothing; the installed CLI status prints the
      version declared by the installed plugin.yaml.
+  I  remember body_json normalization (0.4.2): a dict/list body_json is
+     coerced to a JSON string BEFORE accent-folding (server schema is
+     strict: "invalid type: map, expected a string"); string input keeps
+     working unchanged; non-remember tools are untouched. Unit scope:
+     normalization logic only (base class stubbed here); MemoryProvider
+     contract acceptance stays with the real-Hermes tests.
 """
 import ast
 import subprocess
@@ -200,6 +206,65 @@ def main():
     check("H3 CLI status reads installed plugin.yaml and prints version",
           cli.count("_installed_manifest_version()") >= 2
           and 'print(f"Version:' in cli)
+
+    print("== I remember body_json normalization (0.4.2) ==")
+    import json as _json
+    import types as _types
+    _ag = _types.ModuleType("agent")
+    _mp = _types.ModuleType("agent.memory_provider")
+    class _Base:  # unit scope: the base class plays no role in the
+        pass      # normalization logic under test
+    _mp.MemoryProvider = _Base
+    _mp.spawn_context_thread = lambda *a, **k: None  # unit scope: host
+    _ag.memory_provider = _mp                        # contract stays elsewhere
+    _saved = {k: sys.modules.get(k) for k in
+              ("agent", "agent.memory_provider")}
+    sys.modules["agent"] = _ag
+    sys.modules["agent.memory_provider"] = _mp
+    try:
+        pm = _types.ModuleType("pv_provider_unit")
+        pm.__file__ = "provider_unit"
+        exec(compile(ns["PROVIDER_PY"], "provider_unit", "exec"),
+             pm.__dict__)
+        cap = {}
+        class _FC:
+            def call_tool(self, name, args, timeout=None):
+                cap["args"] = args
+                return {"ok": True}
+        prov = pm.PerseusVaultProvider.__new__(pm.PerseusVaultProvider)
+        prov._enabled = True
+        prov._client = _FC()
+        prov._ws_args = lambda: {}
+        prov.handle_tool_call("perseus_vault_remember",
+            {"category": "x", "key": "k",
+             "body_json": {"nota": "operaci\u00f3n real"}})
+        bj = cap["args"]["body_json"]
+        check("I1 object body_json reaches the server as a JSON string",
+              isinstance(bj, str)
+              and _json.loads(bj) == {"nota": "operacion real"})
+        prov.handle_tool_call("perseus_vault_remember",
+            {"category": "x", "key": "k",
+             "body_json": '{"nota": "operaci\u00f3n"}'})
+        bj2 = cap["args"]["body_json"]
+        check("I2 string body_json unchanged in kind, still folded",
+              isinstance(bj2, str) and "operacion" in bj2
+              and _json.loads(bj2) == {"nota": "operacion"})
+        prov.handle_tool_call("perseus_vault_remember",
+            {"body_json": ["\u00c1a"]})
+        bj3 = cap["args"]["body_json"]
+        check("I3 list body_json normalized to JSON string",
+            isinstance(bj3, str) and _json.loads(bj3) == ["Aa"])
+        prov.handle_tool_call("perseus_vault_recall", {"query": "x"})
+        check("I4 non-remember tools untouched by the coercion",
+              "body_json" not in cap["args"]
+              and cap["args"].get("query") == "x"
+              and cap["args"].get("preview_cap") == pm._PREVIEW_CAP)
+    finally:
+        for k, v in _saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
 
     print(f"\nG: {PASS}/{PASS + FAIL}")
     return 0 if FAIL == 0 else 1

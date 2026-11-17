@@ -473,7 +473,7 @@ contracts documented in this README before use.
 
 ## Changes by version
 
-### 0.4.2 — traceability and docs (no behavior change)
+### 0.4.2 — traceability, docs, and remember type normalization
 - Version planes unified: `PLUGIN_VERSION` == embedded `plugin.yaml` ==
   release tag (the embedded manifest still declared `0.3.0` while the
   series was already 0.4.x). The embedded manifest interpolates
@@ -483,6 +483,12 @@ contracts documented in this README before use.
   in its banner, then the checksums of the files actually written.
 - `hermes perseus-vault status` prints the version declared by the
   installed `plugin.yaml`.
+- `perseus_vault_remember`: a `body_json` delivered as a parsed object
+  or list is normalized to a JSON string BEFORE accent-folding. The
+  server schema is strict (`invalid type: map, expected a string`) and
+  some callers deliver it already parsed. Type normalization only: the
+  provider never invents or alters content. Validated in operation on
+  the production host first; unit-tested in suite I.
 - Host manifest contract verified against the installed host's parser: the
   plugin `version` field is a free-form string (no format/range/warning);
   the schema gate is `manifest_version` (int; absent = v1, supported).

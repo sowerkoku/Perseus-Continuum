@@ -3305,6 +3305,16 @@ class PerseusVaultProvider(MemoryProvider):
                                         f"the perseus-vault provider"})
         try:
             call_args = dict(args or {})
+            # Server schema requires body_json as a JSON *string*. Some
+            # callers deliver it already parsed as an object; coerce to
+            # string BEFORE folding so the server sees the contract type
+            # (review 2026-11-17; observed rejection "invalid type: map,
+            # expected a string"). This is type normalization only: the
+            # provider never invents or alters content here.
+            if tool_name == "perseus_vault_remember" and isinstance(
+                    call_args.get("body_json"), (dict, list)):
+                call_args["body_json"] = json.dumps(
+                    call_args["body_json"], ensure_ascii=False)
             # Accent-fold on the write path: entities this plugin stores then
             # never carry a multi-byte char at the preview-cap byte boundary.
             # body_json arrives as a JSON *string* (often with \uXXXX escapes),
